@@ -1,0 +1,55 @@
+name: Deploy Squid
+
+# Controls when the action will run
+on:
+  # Allows the workflow to be triggered manually from the GitHub Actions tab
+  workflow_dispatch:
+    inputs:
+      deploy_to_prod:
+        type: boolean
+        description: Deploy to production?
+        required: false
+        default: false
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  deploy:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event.inputs.deploy_to_prod == 'true'
+    permissions:
+      contents: read
+      packages: write
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Check out the repository code
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      # Set up Node.js environment
+      - name: Set up Node.js
+        uses: actions/setup-node@v2
+        with:
+          node-version: '18.x'
+          scope: '@protocol-squid'
+
+      # Install dependencies
+      - name: Install dependencies
+        run: npm install
+
+      # Build the Squid project
+      - name: Build Squid project
+        run: npm run build
+
+      # Install Squid CLI
+      - name: Install Squid CLI
+        run: npm install @subsquid/cli
+
+      # Configure CLI with Squid Auth Token (store the token as `SQUID_AUTH_TOKEN` in GitHub secrets)
+      - name: Configure CLI using Squid Auth token
+        run: npx sqd auth -k ${{ secrets.SQUID_AUTH_TOKEN }}
+
+      # Deploy Squid
+      - name: Deploy Squid
+        run: npx sqd deploy "." --org ozean --allow-update --no-stream-logs

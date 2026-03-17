@@ -1,0 +1,15 @@
+export enum OperationType {
+    Repaid = "Repaid",
+    Deposited = "Deposited",
+    Withdrawal = "Withdrawal",
+    PoolClosed = "PoolClosed",
+    TransferIn = "TransferIn",
+    TransferOut = "TransferOut",
+    InterestAccrued = "InterestAccrued",
+    PenaltyInterestAccrued = "PenaltyInterestAccrued",
+    InterestEarned = "InterestEarned",
+    PenaltyInterestEarned = "PenaltyInterestEarned",
+    Staked = "Staked",
+    Unstaked = "Unstaked",
+    YieldDistributed = "YieldDistributed",
+}

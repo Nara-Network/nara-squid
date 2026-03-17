@@ -1,0 +1,61 @@
+manifestVersion: subsquid.io/v0.1
+name: ozean-squid
+version: 1
+description: 'The very first evm squid from manifest'
+build:
+deploy:
+  addons:
+    postgres:
+      config:
+        max_pred_locks_per_transaction: 1024
+        max_locks_per_transaction: 1024
+    rpc:
+      - eth.http
+      - eth-sepolia.http
+
+  secrets:
+    - OZEAN_API_BASE_URL
+    - ANKR_API_KEY
+    - ALCHEMY_FALLBACK_NETWORKS
+    - COIN_GECKO_API_KEY
+    - OZEAN_ACCESS_TOKEN
+    - SUBSQUID_MASTER_TOKEN
+  init:
+    cmd:
+      - npx
+      - squid-typeorm-migration
+      - apply
+  processor:
+    - name: mainnet-processor
+      cmd: ['node', 'lib/mainnet/logs']
+    # - name: sepolia-processor
+    #   cmd: ['node', 'lib/sepolia/logs']
+    - name: plume-processor
+      cmd: ['node', 'lib/plume/logs']
+    # - name: base-processor
+    #   cmd: ['node', 'lib/base/logs']
+    # - name: flare-processor
+    #   cmd: ['node', 'lib/flare/logs']
+  api:
+    cmd:
+      - npx
+      - squid-graphql-server
+      - '--dumb-cache'
+      - in-memory
+      - '--dumb-cache-ttl'
+      - '1000'
+      - '--dumb-cache-size'
+      - '100'
+      - '--dumb-cache-max-age'
+      - '1000'
+scale:
+  addons:
+    postgres:
+      storage: 10G
+      profile: small
+  processor:
+    profile: small
+  api:
+    profile: small
+    # load-balance 1 replica
+    replicas: 2
