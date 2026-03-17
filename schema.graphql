@@ -1,9 +1,6 @@
 enum Network {
-  SEPOLIA
-  MAINNET
-  PLUME
-  BASE
-  FLARE
+  ARBITRUM
+  ARBITRUM_SEPOLIA
 }
 
 enum PoolStatus {

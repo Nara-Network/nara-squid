@@ -8,12 +8,9 @@
     "format": "prettier . --write **/*.{js,ts,json} --ignore-path .prettierignore",
     "test": "mocha -r ts-node/register/transpile-only -r tsconfig-paths/register 'src/test/**/*.test.ts'",
     "migrate": "sqd down && sqd typegen && sqd codegen && sqd build && sqd up && sqd migration:generate && sqd migration:apply",
-    "squid:plume": "npm run migrate && sqd process:plume",
-    "squid:sepolia": "npm run migrate && sqd process:sepolia",
-    "squid:base": "npm run migrate && sqd process:base",
-    "squid:flare": "npm run migrate && sqd process:flare",
-    "squid:mainnet": "npm run migrate && sqd process:mainnet",
-    "squid": "npm run migrate && sqd run"
+    "squid:arbitrum": "npm run migrate && sqd process:arbitrum",
+    "squid:arbitrumSepolia": "npm run migrate && sqd process:arbitrumSepolia",
+    "squid": "npm run squid:arbitrum"
   },
   "dependencies": {
     "@subsquid/archive-registry": "^3.3.2",

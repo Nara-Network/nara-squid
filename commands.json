@@ -51,30 +51,15 @@
         "--multicall"
       ]
     },
-    "process:sepolia": {
+    "process:arbitrum": {
       "description": "Load .env and start the squid processor",
       "deps": ["build", "migration:apply"],
-      "cmd": ["node", "--require=dotenv/config", "lib/sepolia/logs.js"]
+      "cmd": ["node", "--require=dotenv/config", "lib/arbitrum/logs.js"]
     },
-    "process:mainnet": {
+    "process:arbitrumSepolia": {
       "description": "Load .env and start the squid processor",
       "deps": ["build", "migration:apply"],
-      "cmd": ["node", "--require=dotenv/config", "lib/mainnet/logs.js"]
-    },
-    "process:plume": {
-      "description": "Load .env and start the squid processor",
-      "deps": ["build", "migration:apply"],
-      "cmd": ["node", "--require=dotenv/config", "lib/plume/logs.js"]
-    },
-    "process:base": {
-      "description": "Load .env and start the squid processor",
-      "deps": ["build", "migration:apply"],
-      "cmd": ["node", "--require=dotenv/config", "lib/base/logs.js"]
-    },
-    "process:flare": {
-      "description": "Load .env and start the squid processor",
-      "deps": ["build", "migration:apply"],
-      "cmd": ["node", "--require=dotenv/config", "lib/flare/logs.js"]
+      "cmd": ["node", "--require=dotenv/config", "lib/arbitrumSepolia/logs.js"]
     },
     "serve": {
       "description": "Start the GraphQL API server",

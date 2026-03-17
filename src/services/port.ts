@@ -24,7 +24,7 @@ async function getPortVaultByAddress(ctx: ProcessorContext, address: string): Pr
 }
 
 async function initializePort({ ctx, config, portVaults, expectedExchangeRates }: { ctx: ProcessorContext, config: Config, portVaults: Map<string, PortVault>, expectedExchangeRates: Map<string, ExpectedExchangeRate> }): Promise<{ portVaults: Map<string, PortVault>, expectedExchangeRates: Map<string, ExpectedExchangeRate> }> {
-  if (ctx.syncedNetwork !== Network.SEPOLIA && ctx.syncedNetwork !== Network.MAINNET && ctx.syncedNetwork !== Network.PLUME && ctx.syncedNetwork !== Network.BASE && ctx.syncedNetwork !== Network.FLARE) {
+  if (ctx.syncedNetwork !== Network.ARBITRUM && ctx.syncedNetwork !== Network.ARBITRUM_SEPOLIA) {
     return { portVaults, expectedExchangeRates };
   }
 

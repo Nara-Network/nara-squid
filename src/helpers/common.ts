@@ -42,7 +42,7 @@ export function hasPassedMinutesUTC(dateLeftUTC: Date, dateRightUTC: Date, minut
 }
 
 export function isTestnet(network: Network): boolean {
-  return network === Network.SEPOLIA;
+  return network === Network.ARBITRUM_SEPOLIA;
 }
 
 export async function readContract<T extends { functions: { [key: string]: AbiFunction<any, any> } }, K extends string>(

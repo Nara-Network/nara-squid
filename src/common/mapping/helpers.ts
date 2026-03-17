@@ -9,7 +9,7 @@ import { DateTime } from 'luxon';
 import { toWei } from './decimal';
 import { defineChain } from 'viem';
 import { tokensService } from '../../services/tokens';
-import { mainnet, sepolia } from 'viem/chains';
+import { arbitrum, arbitrumSepolia } from 'viem/chains';
 
 // TODO: NEED TO UPDATE! IS THIS JUST SEPOLIA?
 export const MULTICALL_ADDRESS = '0xcA11bde05977b3631167028862bE2a173976CA11';
@@ -264,32 +264,5 @@ export function calcOzeanReward(curentTs: number, lastUpdate: bigint, amount: bi
 //   testnet: true,
 // });
 
-export const poseidon_testnet = defineChain({
-  id: 31911,
-  name: 'Poseidon Testnet',
-  nativeCurrency: {
-    decimals: 18,
-    name: 'ETH',
-    symbol: 'ETH',
-  },
-  rpcUrls: {
-    default: { http: ['https://poseidon-testnet.rpc.caldera.xyz/http'] },
-  },
-  blockExplorers: {
-    default: {
-      name: 'Ozean Testnet explorer',
-      url: 'https://poseidon-testnet.explorer.caldera.xyz/',
-      apiUrl: 'https://poseidon-testnet.explorer.caldera.xyz/api/v2/',
-    },
-  },
-  contracts: {
-    multicall3: {
-      address: '0xca11bde05977b3631167028862be2a173976ca11', // TODO: NEED TO UPDATE!
-      blockCreated: 1802407,
-    },
-  },
-  testnet: true,
-});
-
-export const SupportedChainIds = [poseidon_testnet.id, sepolia.id, mainnet.id] as const;
+export const SupportedChainIds = [arbitrumSepolia.id, arbitrum.id] as const;
 export type SupportedChainId = typeof SupportedChainIds[number];

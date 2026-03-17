@@ -1,6 +1,6 @@
 [![Open in Gitpod](https://gitpod.io/button/open-in-gitpod.svg)](https://gitpod.io/#https://github.com/subsquid/squid-evm-template)
 
-# Ozean Squid Protocol
+# Squid Protocol
 
 ## Developing
 
@@ -22,7 +22,6 @@
 2. Set the required environment variables for local development:
 
    - **CMC_API_KEY** - Obtain from [CoinMarketCap](https://coinmarketcap.com/api/).
-   - **ETHEREUM_API_KEY** - Obtain from [Alchemy](https://www.alchemy.com/).
    - **ANKR_API_KEY** - Obtain from [Ankr](https://www.ankr.com/).
    - **MANAGER_API_KEY** - String header used for API requests (you can use any text you want).
 
@@ -56,7 +55,7 @@
 
 ### 3. Running
 
-1. Adjust the `config.json` file as needed (for example, set the `PoolFactory` address to `null` to disable the syncing process of the pool factory).
+1. Adjust [`src/config.json`](/Users/fsebaste/Desktop/NARA/squid/src/config.json) with the Arbitrum and Arbitrum Sepolia vault configuration before running a processor. The repository currently keeps both networks disabled until those addresses are added.
 
 2. Start the processor (the migration scripts will be run automatically):
 
@@ -64,10 +63,10 @@
    sqd run
    ```
 
-   Or you can specify to run the processor for each network, Sepolia for example:
+   Or run a specific processor:
 
    ```
-   sqd process:sepolia
+   sqd process:arbitrum
    ```
 
    Check (command.json file) for more details.
@@ -77,16 +76,16 @@
    e.g.
 
    ```json
-   ALCHEMY_FALLBACK_NETWORKS = ["ZKEVM", "SEPOLIA", "MANTLE"]
+   ALCHEMY_FALLBACK_NETWORKS = ["ARBITRUM", "ARBITRUM_SEPOLIA"]
    ```
 
    Please keep in mind that we are using that method only in case there are some outages with the existing RPC.
    Current state:
 
    ```json
-   ALCHEMY_FALLBACK_NETWORKS=["ZKEVM"]
+   ALCHEMY_FALLBACK_NETWORKS=[]
    BLAST_FALLBACK_NETWORKS=[]
-   SQUID_FALLBACK_NETWORKS
+   SQUID_FALLBACK_NETWORKS=[]
    ```
 
    The command above will block the terminal being busy with fetching the chain data, transforming and storing it in the target database.

@@ -64,34 +64,23 @@ export type Configurator = {
 };
 
 export const squidStoreNames: Record<string, string> = {
-  MAINNET: 'eth_processor',
-  SEPOLIA: 'sepolia_processor',
-  PLUME: 'plume_processor',
-  BASE: 'base_processor',
-  FLARE: 'flare_processor'
+  ARBITRUM: 'arbitrum_processor',
+  ARBITRUM_SEPOLIA: 'arbitrum_sepolia_processor'
 };
 
 const ankrSlugByNetwork = {
-  MAINNET: 'eth',
-  SEPOLIA: 'eth_sepolia',
-  PLUME: 'eth_plume',
-  BASE: 'base',
-  FLARE: 'flare'
+  ARBITRUM: 'arbitrum',
+  ARBITRUM_SEPOLIA: 'arbitrum_sepolia'
 };
 
 const alchemySlugByNetwork = {
-  MAINNET: 'eth-mainnet',
-  SEPOLIA: 'eth-sepolia',
-  PLUME: 'eth-plume',
-  BASE: 'base',
-  FLARE: 'flare'
+  ARBITRUM: 'arb-mainnet',
+  ARBITRUM_SEPOLIA: 'arb-sepolia'
 };
 
 const squidSlugByNetwork = {
-  MAINNET: process.env.RPC_ETH_HTTP,
-  SEPOLIA: process.env.RPC_ETH_SEPOLIA_HTTP,
-  PLUME: process.env.RPC_ETH_PLUME_HTTP,
-  BASE: process.env.RPC_ETH_BASE_HTTP
+  ARBITRUM: process.env.RPC_ARBITRUM_HTTP,
+  ARBITRUM_SEPOLIA: process.env.RPC_ARBITRUM_SEPOLIA_HTTP
 };
 
 const alchemyFallbacks = JSON.parse(process.env.ALCHEMY_FALLBACK_NETWORKS || '[]'); // unique key
@@ -116,17 +105,14 @@ export const getRpcUrl = (network: Network, fallbackKey?: any): string | RpcEndp
   }
   return {
     url: `https://rpc.ankr.com/${ankrSlugByNetwork[network as keyof typeof ankrSlugByNetwork]}/${ankrApiKey}`,
-    rateLimit: network === Network.FLARE ? 50 : 100,
-    maxBatchCallSize: network === Network.FLARE ? 5000 : 1000,
+    rateLimit: 100,
+    maxBatchCallSize: 1000,
   };
 };
 
 const MINUTE = 60;
 
 export const poolSizeDelayByNetwork = {
-  MAINNET: MINUTE,
-  SEPOLIA: 2.5 * MINUTE,
-  BASE: 5.5 * MINUTE,
-  PLUME: MINUTE,
-  FLARE: 6.5 * MINUTE,
+  ARBITRUM: MINUTE,
+  ARBITRUM_SEPOLIA: 2.5 * MINUTE,
 };

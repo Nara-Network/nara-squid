@@ -9,9 +9,6 @@ deploy:
       config:
         max_pred_locks_per_transaction: 1024
         max_locks_per_transaction: 1024
-    rpc:
-      - eth.http
-      - eth-sepolia.http
 
   secrets:
     - OZEAN_API_BASE_URL
@@ -26,16 +23,10 @@ deploy:
       - squid-typeorm-migration
       - apply
   processor:
-    - name: mainnet-processor
-      cmd: ['node', 'lib/mainnet/logs']
-    # - name: sepolia-processor
-    #   cmd: ['node', 'lib/sepolia/logs']
-    - name: plume-processor
-      cmd: ['node', 'lib/plume/logs']
-    # - name: base-processor
-    #   cmd: ['node', 'lib/base/logs']
-    # - name: flare-processor
-    #   cmd: ['node', 'lib/flare/logs']
+    - name: arbitrum-processor
+      cmd: ['node', 'lib/arbitrum/logs']
+    - name: arbitrum-sepolia-processor
+      cmd: ['node', 'lib/arbitrumSepolia/logs']
   api:
     cmd:
       - npx
