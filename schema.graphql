@@ -255,6 +255,16 @@ type LgeGlobalStats @entity {
   network: Network! @index
 }
 
+type NaraGlobalStats @entity {
+  id: ID! @index
+  network: Network! @index
+  naraUsdSupply: BigInt!
+  naraUsdSupplyFormatted: BigDecimal!
+  naraUsdDecimals: Int!
+  percentageStaked: BigDecimal!
+  updatedAt: BigInt!
+}
+
 # Port
 
 type PortGlobalStats @entity {

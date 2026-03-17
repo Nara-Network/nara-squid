@@ -19,7 +19,8 @@ import {
   ManagerWithdraw,
   ManagerDeposit,
   BorrowedAssetBalance,
-  BlockBatchAudit
+  BlockBatchAudit,
+  NaraGlobalStats
 } from '../../model';
 import { ProcessorContext } from '../processor';
 
@@ -40,6 +41,7 @@ import { strategyService } from '../../services/strategy';
 import { getVaultAddressFromTransferLog } from '../../helpers/eer';
 import { parserService } from '../../services/parser';
 import { eerService } from '../../services/eer';
+import { naraService } from '../../services/nara';
 import { floorToHour } from '../utils/time';
 
 export async function parseContext(
@@ -72,6 +74,7 @@ export async function parseContext(
   let managerDeposits: Map<string, ManagerDeposit> = new Map()
   let borrowedBalances: Map<string, BorrowedAssetBalance> = new Map()
   let snapshots: Map<string, ExpectedExchangeRateSnapshot> = new Map()
+  let naraGlobalStats: NaraGlobalStats = await naraService.getGlobalStats(ctx)
 
   await initializeTokens(ctx)
 
@@ -453,6 +456,8 @@ export async function parseContext(
 
   ({ portVaults } = await portService.updateAllVaultTvl(ctx, portVaults, config))
 
+  naraGlobalStats = await naraService.updateGlobalStats(ctx, naraGlobalStats)
+
   await ctx.store.upsert([...currencies.values()])
   await ctx.store.upsert([...users.values()])
   await ctx.store.upsert([...portVaults.values()])
@@ -479,6 +484,7 @@ export async function parseContext(
   await ctx.store.upsert([...snapshots.values()])
 
   await ctx.store.upsert(portGlobalStats)
+  await ctx.store.upsert(naraGlobalStats)
 
   // Update batch audit finishedAt timestamp
   batchAudit.finishedAt = BigInt(Date.now())
