@@ -435,12 +435,14 @@ type PortVaultApyChart @entity {
   id: ID! @index
   vault: PortVault! @index
   apy7d: BigInt!
+  apy14d: BigInt!
   apy30d: BigInt!
   apy365d: BigInt!
   timestamp: BigInt!
   block: BigInt!
   exchangeRate: BigInt!
   exchangeRate7dAgo: BigInt!
+  exchangeRate14dAgo: BigInt!
   exchangeRate30dAgo: BigInt!
   exchangeRate365dAgo: BigInt!
 }

@@ -363,6 +363,33 @@ async function calculateRollingAPR(
   return { apr: BigInt(clampedAprBps), historicalER };
 }
 
+async function calculateRollingAprSeries(
+  ctx: ProcessorContext,
+  vault: PortVault,
+  currentExchangeRate: bigint,
+  timestamp: number,
+  startApyCalculationTimestamp?: number
+) {
+  const [result7d, result14d, result30d, result365d] = await Promise.all([
+    calculateRollingAPR(ctx, vault.address, currentExchangeRate, timestamp, 7, vault.startedAt, startApyCalculationTimestamp),
+    calculateRollingAPR(ctx, vault.address, currentExchangeRate, timestamp, 14, vault.startedAt, startApyCalculationTimestamp),
+    calculateRollingAPR(ctx, vault.address, currentExchangeRate, timestamp, 30, vault.startedAt, startApyCalculationTimestamp),
+    calculateRollingAPR(ctx, vault.address, currentExchangeRate, timestamp, 365, vault.startedAt, startApyCalculationTimestamp),
+  ]);
+
+  return {
+    result7d,
+    result14d,
+    result30d,
+    result365d,
+    hasAnyApr:
+      result7d.apr !== null ||
+      result14d.apr !== null ||
+      result30d.apr !== null ||
+      result365d.apr !== null,
+  };
+}
+
 async function getOrCreateDailyChartEntry(
   ctx: ProcessorContext,
   vault: PortVault,
@@ -438,22 +465,29 @@ async function getOrCreateDailyChartEntry(
             const navUpdate = navForDay[0];
             const exchangeRateForDay = navUpdate.newRate;
             // Use the NAV that was valid at the end of this day for calculation
-            const result7d = await calculateRollingAPR(ctx, vault.address, exchangeRateForDay, dayToBackfill, 7, vault.startedAt, startApyCalculationTimestamp);
-            const result30d = await calculateRollingAPR(ctx, vault.address, exchangeRateForDay, dayToBackfill, 30, vault.startedAt, startApyCalculationTimestamp);
-            const result365d = await calculateRollingAPR(ctx, vault.address, exchangeRateForDay, dayToBackfill, 365, vault.startedAt, startApyCalculationTimestamp);
+            const { result7d, result14d, result30d, result365d, hasAnyApr } =
+              await calculateRollingAprSeries(
+                ctx,
+                vault,
+                exchangeRateForDay,
+                dayToBackfill,
+                startApyCalculationTimestamp
+              );
 
-            if (result7d.apr !== null || result30d.apr !== null || result365d.apr !== null) {
+            if (hasAnyApr) {
               const chartId = `${vault.id}-${dayToBackfill}`;
               const portVaultApyChart = new PortVaultApyChart({
                 id: chartId,
                 vault: vault,
                 apy7d: result7d.apr ?? BigInt(0),
+                apy14d: result14d.apr ?? BigInt(0),
                 apy30d: result30d.apr ?? BigInt(0),
                 apy365d: result365d.apr ?? BigInt(0),
                 timestamp: BigInt(dayToBackfill), // Store at end of day (23:59:59)
                 block: navUpdate.block,
                 exchangeRate: exchangeRateForDay,
                 exchangeRate7dAgo: result7d.historicalER,
+                exchangeRate14dAgo: result14d.historicalER,
                 exchangeRate30dAgo: result30d.historicalER,
                 exchangeRate365dAgo: result365d.historicalER,
               });
@@ -477,16 +511,23 @@ async function getOrCreateDailyChartEntry(
   if (memEntryToday) {
     // Update existing entry with new values, but keep timestamp at end of day
     // Use currentDayEnd (23:59:59) for calculation, not currentTimestamp
-    const result7d = await calculateRollingAPR(ctx, vault.address, currentExchangeRate, currentDayEnd, 7, vault.startedAt, startApyCalculationTimestamp);
-    const result30d = await calculateRollingAPR(ctx, vault.address, currentExchangeRate, currentDayEnd, 30, vault.startedAt, startApyCalculationTimestamp);
-    const result365d = await calculateRollingAPR(ctx, vault.address, currentExchangeRate, currentDayEnd, 365, vault.startedAt, startApyCalculationTimestamp);
+    const { result7d, result14d, result30d, result365d, hasAnyApr } =
+      await calculateRollingAprSeries(
+        ctx,
+        vault,
+        currentExchangeRate,
+        currentDayEnd,
+        startApyCalculationTimestamp
+      );
 
-    if (result7d.apr !== null || result30d.apr !== null || result365d.apr !== null) {
+    if (hasAnyApr) {
       memEntryToday.apy7d = result7d.apr ?? BigInt(0);
+      memEntryToday.apy14d = result14d.apr ?? BigInt(0);
       memEntryToday.apy30d = result30d.apr ?? BigInt(0);
       memEntryToday.apy365d = result365d.apr ?? BigInt(0);
       memEntryToday.exchangeRate = currentExchangeRate;
       memEntryToday.exchangeRate7dAgo = result7d.historicalER;
+      memEntryToday.exchangeRate14dAgo = result14d.historicalER;
       memEntryToday.exchangeRate30dAgo = result30d.historicalER;
       memEntryToday.exchangeRate365dAgo = result365d.historicalER;
       memEntryToday.block = currentBlock;
@@ -512,16 +553,23 @@ async function getOrCreateDailyChartEntry(
     // Update existing entry from database, but keep timestamp at end of day
     const existingEntry = dbEntryToday[0];
     // Use currentDayEnd (23:59:59) for calculation, not currentTimestamp
-    const result7d = await calculateRollingAPR(ctx, vault.address, currentExchangeRate, currentDayEnd, 7, vault.startedAt, startApyCalculationTimestamp);
-    const result30d = await calculateRollingAPR(ctx, vault.address, currentExchangeRate, currentDayEnd, 30, vault.startedAt, startApyCalculationTimestamp);
-    const result365d = await calculateRollingAPR(ctx, vault.address, currentExchangeRate, currentDayEnd, 365, vault.startedAt, startApyCalculationTimestamp);
+    const { result7d, result14d, result30d, result365d, hasAnyApr } =
+      await calculateRollingAprSeries(
+        ctx,
+        vault,
+        currentExchangeRate,
+        currentDayEnd,
+        startApyCalculationTimestamp
+      );
 
-    if (result7d.apr !== null || result30d.apr !== null || result365d.apr !== null) {
+    if (hasAnyApr) {
       existingEntry.apy7d = result7d.apr ?? BigInt(0);
+      existingEntry.apy14d = result14d.apr ?? BigInt(0);
       existingEntry.apy30d = result30d.apr ?? BigInt(0);
       existingEntry.apy365d = result365d.apr ?? BigInt(0);
       existingEntry.exchangeRate = currentExchangeRate;
       existingEntry.exchangeRate7dAgo = result7d.historicalER;
+      existingEntry.exchangeRate14dAgo = result14d.historicalER;
       existingEntry.exchangeRate30dAgo = result30d.historicalER;
       existingEntry.exchangeRate365dAgo = result365d.historicalER;
       existingEntry.block = currentBlock;
@@ -535,22 +583,29 @@ async function getOrCreateDailyChartEntry(
 
   // Create new entry for today at end of day (23:59:59)
   // Use currentDayEnd (23:59:59) for calculation, not currentTimestamp
-  const result7d = await calculateRollingAPR(ctx, vault.address, currentExchangeRate, currentDayEnd, 7, vault.startedAt, startApyCalculationTimestamp);
-  const result30d = await calculateRollingAPR(ctx, vault.address, currentExchangeRate, currentDayEnd, 30, vault.startedAt, startApyCalculationTimestamp);
-  const result365d = await calculateRollingAPR(ctx, vault.address, currentExchangeRate, currentDayEnd, 365, vault.startedAt, startApyCalculationTimestamp);
+  const { result7d, result14d, result30d, result365d, hasAnyApr } =
+    await calculateRollingAprSeries(
+      ctx,
+      vault,
+      currentExchangeRate,
+      currentDayEnd,
+      startApyCalculationTimestamp
+    );
 
-  if (result7d.apr !== null || result30d.apr !== null || result365d.apr !== null) {
+  if (hasAnyApr) {
     const chartId = `${vault.id}-${currentDayEnd}`;
     const portVaultApyChart = new PortVaultApyChart({
       id: chartId,
       vault: vault,
       apy7d: result7d.apr ?? BigInt(0),
+      apy14d: result14d.apr ?? BigInt(0),
       apy30d: result30d.apr ?? BigInt(0),
       apy365d: result365d.apr ?? BigInt(0),
       timestamp: BigInt(currentDayEnd), // Always store at end of day (23:59:59)
       block: currentBlock,
       exchangeRate: currentExchangeRate,
       exchangeRate7dAgo: result7d.historicalER,
+      exchangeRate14dAgo: result14d.historicalER,
       exchangeRate30dAgo: result30d.historicalER,
       exchangeRate365dAgo: result365d.historicalER,
     });
@@ -708,24 +763,31 @@ async function updateAllVaultApyCharts(
       const exchangeRateForYesterday = portVault.currentNav;
 
       // Use current NAV for APR calculation
-      // This calculates APR as of yesterday by comparing current rate to 7/30/365 days before yesterday
+      // This calculates APR as of yesterday by comparing current rate to 7/14/30/365 days before yesterday
       const startApyCalculationTimestamp = config.Port?.Vaults?.find((v) => v.address.toLowerCase() == portVault.address.toLowerCase())?.StartApyCalculationTimestamp;
-      const result7d = await calculateRollingAPR(ctx, portVault.address, exchangeRateForYesterday, yesterdayEnd, 7, portVault.startedAt, startApyCalculationTimestamp);
-      const result30d = await calculateRollingAPR(ctx, portVault.address, exchangeRateForYesterday, yesterdayEnd, 30, portVault.startedAt, startApyCalculationTimestamp);
-      const result365d = await calculateRollingAPR(ctx, portVault.address, exchangeRateForYesterday, yesterdayEnd, 365, portVault.startedAt, startApyCalculationTimestamp);
+      const { result7d, result14d, result30d, result365d, hasAnyApr } =
+        await calculateRollingAprSeries(
+          ctx,
+          portVault,
+          exchangeRateForYesterday,
+          yesterdayEnd,
+          startApyCalculationTimestamp
+        );
 
-      if (result7d.apr !== null || result30d.apr !== null || result365d.apr !== null) {
+      if (hasAnyApr) {
         const chartId = `${portVault.id}-${yesterdayEnd}`;
         const portVaultApyChart = new PortVaultApyChart({
           id: chartId,
           vault: portVault,
           apy7d: result7d.apr ?? BigInt(0),
+          apy14d: result14d.apr ?? BigInt(0),
           apy30d: result30d.apr ?? BigInt(0),
           apy365d: result365d.apr ?? BigInt(0),
           timestamp: BigInt(yesterdayEnd), // Store at end of day (23:59:59)
           block: navUpdate.block,
           exchangeRate: exchangeRateForYesterday,
           exchangeRate7dAgo: result7d.historicalER,
+          exchangeRate14dAgo: result14d.historicalER,
           exchangeRate30dAgo: result30d.historicalER,
           exchangeRate365dAgo: result365d.historicalER,
         });

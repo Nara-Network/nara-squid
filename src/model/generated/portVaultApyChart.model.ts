@@ -18,6 +18,9 @@ export class PortVaultApyChart {
     apy7d!: bigint
 
     @BigIntColumn_({nullable: false})
+    apy14d!: bigint
+
+    @BigIntColumn_({nullable: false})
     apy30d!: bigint
 
     @BigIntColumn_({nullable: false})
@@ -34,6 +37,9 @@ export class PortVaultApyChart {
 
     @BigIntColumn_({nullable: false})
     exchangeRate7dAgo!: bigint
+
+    @BigIntColumn_({nullable: false})
+    exchangeRate14dAgo!: bigint
 
     @BigIntColumn_({nullable: false})
     exchangeRate30dAgo!: bigint
