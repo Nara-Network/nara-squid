@@ -1,5 +1,5 @@
-module.exports = class Data1774256897251 {
-    name = 'Data1774256897251'
+module.exports = class Data1774273997140 {
+    name = 'Data1774273997140'
 
     async up(db) {
         await db.query(`CREATE TABLE "token" ("id" character varying NOT NULL, "address" text NOT NULL, "network" character varying(16) NOT NULL, "name" text NOT NULL, "symbol" text NOT NULL, "decimals" numeric NOT NULL, "price" numeric NOT NULL, "is_pool_token" boolean NOT NULL, "coin_gecko_id" text, "tvl_multiplier" integer NOT NULL, CONSTRAINT "PK_82fae97f905930df5d62a702fc9" PRIMARY KEY ("id"))`)
@@ -61,6 +61,16 @@ module.exports = class Data1774256897251 {
         await db.query(`CREATE INDEX "IDX_202242057c4b06feebcd8736d4" ON "lge_global_stats" ("network") `)
         await db.query(`CREATE TABLE "nara_global_stats" ("id" character varying NOT NULL, "network" character varying(16) NOT NULL, "nara_usd_supply" numeric NOT NULL, "nara_usd_supply_formatted" numeric NOT NULL, "nara_usd_decimals" integer NOT NULL, "reserve_fund_formatted" numeric NOT NULL, "protocol_backing_ratio" numeric NOT NULL, "percentage_staked" numeric NOT NULL, "updated_at" numeric NOT NULL, CONSTRAINT "PK_ca6437959632f20249ff22d3050" PRIMARY KEY ("id"))`)
         await db.query(`CREATE INDEX "IDX_49add277f5c2a04994682fe6bc" ON "nara_global_stats" ("network") `)
+        await db.query(`CREATE TABLE "nara_supply_chart_point" ("id" character varying NOT NULL, "network" character varying(16) NOT NULL, "timestamp" numeric NOT NULL, "block" numeric NOT NULL, "nara_usd_supply" numeric NOT NULL, "nara_usd_supply_formatted" numeric NOT NULL, CONSTRAINT "PK_63da7b0b67d4e53729146d5a089" PRIMARY KEY ("id"))`)
+        await db.query(`CREATE INDEX "IDX_1cfd9f5fb99a6c2c36c24c1de0" ON "nara_supply_chart_point" ("network") `)
+        await db.query(`CREATE INDEX "IDX_b1fbcf17de84907b8550cb9d74" ON "nara_supply_chart_point" ("timestamp") `)
+        await db.query(`CREATE TABLE "nara_tvl_chart_point" ("id" character varying NOT NULL, "network" character varying(16) NOT NULL, "chain" text NOT NULL, "timestamp" numeric NOT NULL, "block" numeric NOT NULL, "tvl_usd" numeric NOT NULL, CONSTRAINT "PK_b939a3b5a673a1c61fae48694b5" PRIMARY KEY ("id"))`)
+        await db.query(`CREATE INDEX "IDX_e9a05a0bc52b6244ecd9c4e909" ON "nara_tvl_chart_point" ("network") `)
+        await db.query(`CREATE INDEX "IDX_cf3e74235a27cda9498071f39b" ON "nara_tvl_chart_point" ("chain") `)
+        await db.query(`CREATE INDEX "IDX_2bad7d295eae01d163f98acf1f" ON "nara_tvl_chart_point" ("timestamp") `)
+        await db.query(`CREATE TABLE "nara_apy_chart_point" ("id" character varying NOT NULL, "network" character varying(16) NOT NULL, "timestamp" numeric NOT NULL, "block" numeric NOT NULL, "apy7d" numeric NOT NULL, "apy14d" numeric NOT NULL, "apy30d" numeric NOT NULL, CONSTRAINT "PK_5ec62d975c6158d60228ef3ad8c" PRIMARY KEY ("id"))`)
+        await db.query(`CREATE INDEX "IDX_7d48d7547ad17620d0adcdb0f4" ON "nara_apy_chart_point" ("network") `)
+        await db.query(`CREATE INDEX "IDX_6c9dc0e906a792145f68a710e3" ON "nara_apy_chart_point" ("timestamp") `)
         await db.query(`CREATE TABLE "port_global_stats" ("id" character varying NOT NULL, "network" character varying(16) NOT NULL, "active_users" numeric NOT NULL, CONSTRAINT "PK_5fe9a9ee7840f3d8ec440386874" PRIMARY KEY ("id"))`)
         await db.query(`CREATE INDEX "IDX_d47d6e1f236c286246682d21e9" ON "port_global_stats" ("network") `)
         await db.query(`CREATE TABLE "port_nav_update" ("id" character varying NOT NULL, "old_rate" numeric NOT NULL, "new_rate" numeric NOT NULL, "timestamp" numeric NOT NULL, "tx_hash" text NOT NULL, "block" numeric NOT NULL, "vault_id" character varying, CONSTRAINT "PK_ec1d017c5257f7d54b2e6929c89" PRIMARY KEY ("id"))`)
@@ -78,7 +88,7 @@ module.exports = class Data1774256897251 {
         await db.query(`CREATE INDEX "IDX_6c430ee33ebf67f6b6d58ddfa5" ON "port_vault_transaction_history" ("user_id") `)
         await db.query(`CREATE TABLE "port_vault_apy" ("id" character varying NOT NULL, "apy" numeric NOT NULL, "timestamp" numeric NOT NULL, "block" numeric NOT NULL, "vault_id" character varying, CONSTRAINT "PK_38d72c6773321e80607bfbccd7b" PRIMARY KEY ("id"))`)
         await db.query(`CREATE INDEX "IDX_f957e82b58c244c4f23fdf2590" ON "port_vault_apy" ("vault_id") `)
-        await db.query(`CREATE TABLE "port_vault_apy_chart" ("id" character varying NOT NULL, "apy7d" numeric NOT NULL, "apy30d" numeric NOT NULL, "apy365d" numeric NOT NULL, "timestamp" numeric NOT NULL, "block" numeric NOT NULL, "exchange_rate" numeric NOT NULL, "exchange_rate7d_ago" numeric NOT NULL, "exchange_rate30d_ago" numeric NOT NULL, "exchange_rate365d_ago" numeric NOT NULL, "vault_id" character varying, CONSTRAINT "PK_b458e2302536cd5ad08bd33be40" PRIMARY KEY ("id"))`)
+        await db.query(`CREATE TABLE "port_vault_apy_chart" ("id" character varying NOT NULL, "apy7d" numeric NOT NULL, "apy14d" numeric NOT NULL, "apy30d" numeric NOT NULL, "apy365d" numeric NOT NULL, "timestamp" numeric NOT NULL, "block" numeric NOT NULL, "exchange_rate" numeric NOT NULL, "exchange_rate7d_ago" numeric NOT NULL, "exchange_rate14d_ago" numeric NOT NULL, "exchange_rate30d_ago" numeric NOT NULL, "exchange_rate365d_ago" numeric NOT NULL, "vault_id" character varying, CONSTRAINT "PK_b458e2302536cd5ad08bd33be40" PRIMARY KEY ("id"))`)
         await db.query(`CREATE INDEX "IDX_ead1b71dee7261317832feb1ee" ON "port_vault_apy_chart" ("vault_id") `)
         await db.query(`CREATE TABLE "funds_diverted" ("id" character varying NOT NULL, "strategy" text NOT NULL, "amount" numeric NOT NULL, "timestamp" numeric NOT NULL, "tx_hash" text NOT NULL, "vault_id" character varying, CONSTRAINT "PK_34b0b4d7b2d8cc140dcf3a1ddf3" PRIMARY KEY ("id"))`)
         await db.query(`CREATE INDEX "IDX_c5eaa6b419c6158d79befc5f38" ON "funds_diverted" ("vault_id") `)
@@ -231,6 +241,16 @@ module.exports = class Data1774256897251 {
         await db.query(`DROP INDEX "public"."IDX_202242057c4b06feebcd8736d4"`)
         await db.query(`DROP TABLE "nara_global_stats"`)
         await db.query(`DROP INDEX "public"."IDX_49add277f5c2a04994682fe6bc"`)
+        await db.query(`DROP TABLE "nara_supply_chart_point"`)
+        await db.query(`DROP INDEX "public"."IDX_1cfd9f5fb99a6c2c36c24c1de0"`)
+        await db.query(`DROP INDEX "public"."IDX_b1fbcf17de84907b8550cb9d74"`)
+        await db.query(`DROP TABLE "nara_tvl_chart_point"`)
+        await db.query(`DROP INDEX "public"."IDX_e9a05a0bc52b6244ecd9c4e909"`)
+        await db.query(`DROP INDEX "public"."IDX_cf3e74235a27cda9498071f39b"`)
+        await db.query(`DROP INDEX "public"."IDX_2bad7d295eae01d163f98acf1f"`)
+        await db.query(`DROP TABLE "nara_apy_chart_point"`)
+        await db.query(`DROP INDEX "public"."IDX_7d48d7547ad17620d0adcdb0f4"`)
+        await db.query(`DROP INDEX "public"."IDX_6c9dc0e906a792145f68a710e3"`)
         await db.query(`DROP TABLE "port_global_stats"`)
         await db.query(`DROP INDEX "public"."IDX_d47d6e1f236c286246682d21e9"`)
         await db.query(`DROP TABLE "port_nav_update"`)

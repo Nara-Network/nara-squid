@@ -43,7 +43,8 @@ async function getTokenBySymbol(ctx: ProcessorContext, symbol: string): Promise<
 
 async function getFormattedSupply(
   ctx: ProcessorContext,
-  token: Token
+  token: Token,
+  blockHeight?: number
 ): Promise<{ rawSupply: bigint; formattedSupply: BigDecimal; decimals: number }> {
   const rawSupply = BigInt(
     await readContract(
@@ -52,7 +53,7 @@ async function getFormattedSupply(
       ERC20Abi,
       'totalSupply',
       [],
-      ctx.blocks[ctx.blocks.length - 1].header.height
+      blockHeight ?? ctx.blocks[ctx.blocks.length - 1].header.height
     )
   );
   const decimals = Number(token.decimals);
@@ -65,7 +66,8 @@ async function getFormattedSupply(
 
 async function getReserveFundFormatted(
   ctx: ProcessorContext,
-  reserveFundSources: NaraReserveFundSource[]
+  reserveFundSources: NaraReserveFundSource[],
+  blockHeight?: number
 ): Promise<BigDecimal | null> {
   if (reserveFundSources.length === 0) {
     return null;
@@ -89,7 +91,7 @@ async function getReserveFundFormatted(
         ERC20Abi,
         'balanceOf',
         { account: source.wallet },
-        ctx.blocks[ctx.blocks.length - 1].header.height
+        blockHeight ?? ctx.blocks[ctx.blocks.length - 1].header.height
       )
     );
 
@@ -103,38 +105,40 @@ async function getReserveFundFormatted(
   return totalReserveFund;
 }
 
-async function updateGlobalStats(
+async function getMetricsAtBlock(
   ctx: ProcessorContext,
   config: Config,
-  naraGlobalStats: NaraGlobalStats
-): Promise<NaraGlobalStats> {
-  const isSynced = ctx.isHead && ctx.blocks.length === 1;
-
-  if (!isSynced) {
-    return naraGlobalStats;
-  }
-
+  blockHeight: number,
+  blockTimestamp: number
+): Promise<{
+  naraUsdSupply: bigint;
+  naraUsdSupplyFormatted: BigDecimal;
+  naraUsdDecimals: number;
+  reserveFundFormatted: BigDecimal;
+  protocolBackingRatio: BigDecimal;
+  percentageStaked: BigDecimal;
+  updatedAt: bigint;
+} | null> {
   const naraUsdToken = await getTokenBySymbol(ctx, NARA_USD_SYMBOL);
   if (!naraUsdToken) {
     ctx.log.warn(`[NARA] Token ${NARA_USD_SYMBOL} not found for network=${ctx.syncedNetwork}`);
-    return naraGlobalStats;
+    return null;
   }
 
   const naraUsdPlusToken = await getTokenBySymbol(ctx, NARA_USD_PLUS_SYMBOL);
   if (!naraUsdPlusToken) {
     ctx.log.warn(`[NARA] Token ${NARA_USD_PLUS_SYMBOL} not found for network=${ctx.syncedNetwork}`);
-    return naraGlobalStats;
+    return null;
   }
 
-  // totalSupply already includes balances held by staking contracts, which remain in circulation.
   const {
     rawSupply: naraUsdSupply,
     formattedSupply: naraUsdSupplyFormatted,
     decimals: naraUsdDecimals,
-  } = await getFormattedSupply(ctx, naraUsdToken);
-  const { formattedSupply: naraUsdPlusSupplyFormatted } = await getFormattedSupply(ctx, naraUsdPlusToken);
+  } = await getFormattedSupply(ctx, naraUsdToken, blockHeight);
+  const { formattedSupply: naraUsdPlusSupplyFormatted } = await getFormattedSupply(ctx, naraUsdPlusToken, blockHeight);
   const reserveFundSources = config.Nara?.ReserveFund ?? [];
-  const reserveFundFormatted = await getReserveFundFormatted(ctx, reserveFundSources);
+  const reserveFundFormatted = await getReserveFundFormatted(ctx, reserveFundSources, blockHeight);
 
   const percentageStaked = naraUsdSupply > 0n
     ? naraUsdPlusSupplyFormatted.mul(BigDecimal(100)).div(naraUsdSupplyFormatted)
@@ -149,19 +153,46 @@ async function updateGlobalStats(
     );
   }
 
+  return {
+    naraUsdSupply,
+    naraUsdSupplyFormatted,
+    naraUsdDecimals,
+    reserveFundFormatted: reserveFundFormatted ?? BigDecimal(0),
+    protocolBackingRatio,
+    percentageStaked,
+    updatedAt: BigInt(blockTimestamp),
+  };
+}
+
+async function updateGlobalStats(
+  ctx: ProcessorContext,
+  config: Config,
+  naraGlobalStats: NaraGlobalStats
+): Promise<NaraGlobalStats> {
+  const isSynced = ctx.isHead && ctx.blocks.length === 1;
+
+  if (!isSynced) {
+    return naraGlobalStats;
+  }
+
+  const block = ctx.blocks[ctx.blocks.length - 1];
+  const metrics = await getMetricsAtBlock(ctx, config, block.header.height, block.header.timestamp);
+  if (!metrics) return naraGlobalStats;
+
   naraGlobalStats.network = ctx.syncedNetwork as Network;
-  naraGlobalStats.naraUsdSupply = naraUsdSupply;
-  naraGlobalStats.naraUsdSupplyFormatted = naraUsdSupplyFormatted;
-  naraGlobalStats.naraUsdDecimals = naraUsdDecimals;
-  naraGlobalStats.reserveFundFormatted = reserveFundFormatted ?? BigDecimal(0);
-  naraGlobalStats.protocolBackingRatio = protocolBackingRatio;
-  naraGlobalStats.percentageStaked = percentageStaked;
-  naraGlobalStats.updatedAt = BigInt(ctx.blocks[ctx.blocks.length - 1].header.timestamp);
+  naraGlobalStats.naraUsdSupply = metrics.naraUsdSupply;
+  naraGlobalStats.naraUsdSupplyFormatted = metrics.naraUsdSupplyFormatted;
+  naraGlobalStats.naraUsdDecimals = metrics.naraUsdDecimals;
+  naraGlobalStats.reserveFundFormatted = metrics.reserveFundFormatted;
+  naraGlobalStats.protocolBackingRatio = metrics.protocolBackingRatio;
+  naraGlobalStats.percentageStaked = metrics.percentageStaked;
+  naraGlobalStats.updatedAt = metrics.updatedAt;
 
   return naraGlobalStats;
 }
 
 export const naraService = {
   getGlobalStats,
+  getMetricsAtBlock,
   updateGlobalStats,
 };

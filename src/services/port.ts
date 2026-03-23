@@ -288,14 +288,15 @@ async function calculateRollingAPR(
   currentTimestamp: number,
   days: number,
   vaultStartedAt: bigint,
-  startApyCalculationTimestamp?: number
+  startApyCalculationTimestamp?: number,
+  portNavUpdates?: Map<string, PortNavUpdate>
 ): Promise<{ apr: bigint | null; historicalER: bigint }> {
   const daysAgoStart = currentTimestamp - (days * 24 * 60 * 60 * 1000);
   const daysAgoDate = new Date(daysAgoStart);
   daysAgoDate.setHours(23, 59, 59, 999);
   const cutoffTimestamp = daysAgoDate.getTime();
 
-  const navUpdates = await ctx.store.find(PortNavUpdate, {
+  const dbNavUpdates = await ctx.store.find(PortNavUpdate, {
     where: {
       vault: { address: vaultAddress, network: ctx.syncedNetwork },
       timestamp: LessThanOrEqual(BigInt(cutoffTimestamp))
@@ -303,6 +304,17 @@ async function calculateRollingAPR(
     order: { timestamp: 'DESC' },
     take: 1
   });
+
+  const memNavUpdates = portNavUpdates
+    ? Array.from(portNavUpdates.values())
+      .filter(update => update.vault.address === vaultAddress && Number(update.timestamp) <= cutoffTimestamp)
+      .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))
+      .slice(0, 1)
+    : [];
+
+  const navUpdates = [...memNavUpdates, ...dbNavUpdates]
+    .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))
+    .slice(0, 1);
 
   const navDecimals = 10n ** 18n;
   let erPast: number;
@@ -368,13 +380,14 @@ async function calculateRollingAprSeries(
   vault: PortVault,
   currentExchangeRate: bigint,
   timestamp: number,
-  startApyCalculationTimestamp?: number
+  startApyCalculationTimestamp?: number,
+  portNavUpdates?: Map<string, PortNavUpdate>
 ) {
   const [result7d, result14d, result30d, result365d] = await Promise.all([
-    calculateRollingAPR(ctx, vault.address, currentExchangeRate, timestamp, 7, vault.startedAt, startApyCalculationTimestamp),
-    calculateRollingAPR(ctx, vault.address, currentExchangeRate, timestamp, 14, vault.startedAt, startApyCalculationTimestamp),
-    calculateRollingAPR(ctx, vault.address, currentExchangeRate, timestamp, 30, vault.startedAt, startApyCalculationTimestamp),
-    calculateRollingAPR(ctx, vault.address, currentExchangeRate, timestamp, 365, vault.startedAt, startApyCalculationTimestamp),
+    calculateRollingAPR(ctx, vault.address, currentExchangeRate, timestamp, 7, vault.startedAt, startApyCalculationTimestamp, portNavUpdates),
+    calculateRollingAPR(ctx, vault.address, currentExchangeRate, timestamp, 14, vault.startedAt, startApyCalculationTimestamp, portNavUpdates),
+    calculateRollingAPR(ctx, vault.address, currentExchangeRate, timestamp, 30, vault.startedAt, startApyCalculationTimestamp, portNavUpdates),
+    calculateRollingAPR(ctx, vault.address, currentExchangeRate, timestamp, 365, vault.startedAt, startApyCalculationTimestamp, portNavUpdates),
   ]);
 
   return {
@@ -397,7 +410,8 @@ async function getOrCreateDailyChartEntry(
   currentTimestamp: number,
   currentBlock: bigint,
   portVaultApyCharts: Map<string, PortVaultApyChart>,
-  startApyCalculationTimestamp?: number
+  startApyCalculationTimestamp?: number,
+  portNavUpdates?: Map<string, PortNavUpdate>
 ): Promise<PortVaultApyChart | null> {
   const currentDate = new Date(currentTimestamp);
   currentDate.setHours(23, 59, 59, 999);
@@ -471,7 +485,8 @@ async function getOrCreateDailyChartEntry(
                 vault,
                 exchangeRateForDay,
                 dayToBackfill,
-                startApyCalculationTimestamp
+                startApyCalculationTimestamp,
+                portNavUpdates
               );
 
             if (hasAnyApr) {
@@ -517,7 +532,8 @@ async function getOrCreateDailyChartEntry(
         vault,
         currentExchangeRate,
         currentDayEnd,
-        startApyCalculationTimestamp
+        startApyCalculationTimestamp,
+        portNavUpdates
       );
 
     if (hasAnyApr) {
@@ -559,7 +575,8 @@ async function getOrCreateDailyChartEntry(
         vault,
         currentExchangeRate,
         currentDayEnd,
-        startApyCalculationTimestamp
+        startApyCalculationTimestamp,
+        portNavUpdates
       );
 
     if (hasAnyApr) {
@@ -589,7 +606,8 @@ async function getOrCreateDailyChartEntry(
       vault,
       currentExchangeRate,
       currentDayEnd,
-      startApyCalculationTimestamp
+      startApyCalculationTimestamp,
+      portNavUpdates
     );
 
   if (hasAnyApr) {
@@ -829,6 +847,27 @@ async function updateExpiredWithdrawalRequests(ctx: ProcessorContext, portWithdr
   return { portWithdrawalRequests, portVaults };
 }
 
+async function calculateVaultTvlAtBlock(
+  ctx: ProcessorContext,
+  portVault: PortVault,
+  blockHeight: number
+): Promise<bigint> {
+  const updatedNav = await readContract(ctx, portVault.accountant, AccountantAbi, 'getRate', [], blockHeight);
+  const navInBaseToken = convertToBaseTokenAmount(BigInt(updatedNav), BigInt(portVault.baseToken.decimals), BigInt(18));
+  const totalSupply = await readContract(ctx, portVault.address, BoringVaultAbi, 'totalSupply', [], blockHeight);
+  let tvl = (totalSupply * navInBaseToken) / BigInt(10 ** portVault.decimals);
+
+  const baseToken = await tokensService.getTokenByAddress(ctx, portVault.baseToken.address);
+  if (baseToken) {
+    const priceInBN = calculateUsdPriceInBN(BigInt(10 ** Number(baseToken.decimals)), baseToken.price, BigInt(baseToken.decimals));
+    tvl = (tvl * priceInBN) / BigInt(10 ** Number(baseToken.decimals));
+  } else {
+    throwError(`Base token not found - calculateVaultTvlAtBlock failed.`, portVault.id);
+  }
+
+  return tvl;
+}
+
 async function updateAllVaultTvl(ctx: ProcessorContext, portVaults: Map<string, PortVault>, config: Config): Promise<{ portVaults: Map<string, PortVault> }> {
   const isSynced = ctx.isHead && ctx.blocks.length === 1;
 
@@ -855,17 +894,7 @@ async function updateAllVaultTvl(ctx: ProcessorContext, portVaults: Map<string, 
       }), portVault, startApyCalculationTimestamp);
     }
 
-    const navInBaseToken = convertToBaseTokenAmount(portVault.currentNav, BigInt(portVault.baseToken.decimals), BigInt(18));
-    const totalSupply = await readContract(ctx, portVault.address, BoringVaultAbi, 'totalSupply', [], ctx.blocks[ctx.blocks.length - 1].header.height);
-    portVault.tvl = (totalSupply * navInBaseToken) / BigInt(10 ** portVault.decimals);
-
-    const baseToken = await tokensService.getTokenByAddress(ctx, portVault.baseToken.address);
-    if (baseToken) {
-      const priceInBN = calculateUsdPriceInBN(BigInt(10 ** Number(baseToken.decimals)), baseToken.price, BigInt(baseToken.decimals));
-      portVault.tvl = (portVault.tvl * priceInBN) / BigInt(10 ** Number(baseToken.decimals));
-    } else {
-      throwError(`Base token not found - updateAllVaultTvl failed.`, portVault.id);
-    }
+    portVault.tvl = await calculateVaultTvlAtBlock(ctx, portVault, ctx.blocks[ctx.blocks.length - 1].header.height);
     portVaults.set(portVault.address.toLowerCase(), portVault);
   }
 
@@ -888,5 +917,6 @@ export const portService = {
   calculateAPRFromRate,
   calculateAverageAPYForPeriod,
   calculateRollingAPR,
+  calculateVaultTvlAtBlock,
   getOrCreateDailyChartEntry,
 }

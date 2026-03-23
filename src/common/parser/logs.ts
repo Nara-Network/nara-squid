@@ -20,7 +20,10 @@ import {
   ManagerDeposit,
   BorrowedAssetBalance,
   BlockBatchAudit,
-  NaraGlobalStats
+  NaraGlobalStats,
+  NaraSupplyChartPoint,
+  NaraTvlChartPoint,
+  NaraApyChartPoint
 } from '../../model';
 import { ProcessorContext } from '../processor';
 
@@ -42,6 +45,7 @@ import { getVaultAddressFromTransferLog } from '../../helpers/eer';
 import { parserService } from '../../services/parser';
 import { eerService } from '../../services/eer';
 import { naraService } from '../../services/nara';
+import { transparencyService } from '../../services/transparency';
 import { floorToHour } from '../utils/time';
 
 function getActiveVaults(config: Config, blockHeight: number) {
@@ -83,6 +87,9 @@ export async function parseContext(
   let borrowedBalances: Map<string, BorrowedAssetBalance> = new Map()
   let snapshots: Map<string, ExpectedExchangeRateSnapshot> = new Map()
   let naraGlobalStats: NaraGlobalStats = await naraService.getGlobalStats(ctx)
+  let naraSupplyChartPoints: Map<string, NaraSupplyChartPoint> = new Map()
+  let naraTvlChartPoints: Map<string, NaraTvlChartPoint> = new Map()
+  let naraApyChartPoints: Map<string, NaraApyChartPoint> = new Map()
 
   await initializeTokens(ctx)
 
@@ -152,9 +159,11 @@ export async function parseContext(
     finishedAt: BigInt(0), // Will be set at end of batch
   })
 
-  let syncedBlock = ctx.blocks[0].header.height
+  let syncedBlock = sortedBlocks[0].header.height
 
-  for (let block of ctx.blocks) {
+  for (let i = 0; i < sortedBlocks.length; i++) {
+    let block = sortedBlocks[i]
+    let nextBlock = sortedBlocks[i + 1]
     const activeVaults = getActiveVaults(config, block.header.height)
     const activeAaveStrategy =
       config.Port?.Strategies?.AAVE && config.Port.Strategies.AAVE.block <= block.header.height
@@ -464,6 +473,24 @@ export async function parseContext(
       block.header.timestamp,
     ))
 
+    if (transparencyService.shouldCaptureDailySnapshot(block.header.timestamp, nextBlock?.header.timestamp)) {
+      ; ({
+        naraSupplyChartPoints,
+        naraTvlChartPoints,
+        naraApyChartPoints,
+      } = await transparencyService.captureDailySnapshotsForBlock({
+        ctx,
+        config,
+        blockHeight: block.header.height,
+        blockTimestamp: block.header.timestamp,
+        portVaults,
+        portNavUpdates,
+        naraSupplyChartPoints,
+        naraTvlChartPoints,
+        naraApyChartPoints,
+      }))
+    }
+
     syncedBlock += syncedBlocksInterval
   }
 
@@ -505,6 +532,9 @@ export async function parseContext(
   await ctx.store.upsert([...managerDeposits.values()])
   await ctx.store.upsert([...borrowedBalances.values()])
   await ctx.store.upsert([...snapshots.values()])
+  await ctx.store.upsert([...naraSupplyChartPoints.values()])
+  await ctx.store.upsert([...naraTvlChartPoints.values()])
+  await ctx.store.upsert([...naraApyChartPoints.values()])
 
   await ctx.store.upsert(portGlobalStats)
   await ctx.store.upsert(naraGlobalStats)

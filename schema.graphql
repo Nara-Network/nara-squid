@@ -267,6 +267,34 @@ type NaraGlobalStats @entity {
   updatedAt: BigInt!
 }
 
+type NaraSupplyChartPoint @entity {
+  id: ID! @index
+  network: Network! @index
+  timestamp: BigInt! @index
+  block: BigInt!
+  naraUsdSupply: BigInt!
+  naraUsdSupplyFormatted: BigDecimal!
+}
+
+type NaraTvlChartPoint @entity {
+  id: ID! @index
+  network: Network! @index
+  chain: String! @index
+  timestamp: BigInt! @index
+  block: BigInt!
+  tvlUsd: BigInt!
+}
+
+type NaraApyChartPoint @entity {
+  id: ID! @index
+  network: Network! @index
+  timestamp: BigInt! @index
+  block: BigInt!
+  apy7d: BigInt!
+  apy14d: BigInt!
+  apy30d: BigInt!
+}
+
 # Port
 
 type PortGlobalStats @entity {

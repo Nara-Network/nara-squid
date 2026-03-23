@@ -344,7 +344,16 @@ async function parseNavUpdate(ctx: ProcessorContext, log: Log, config: Config, p
     const currentExchangeRate = BigInt(newRate);
     const currentTimestampNum = Number(log.block.timestamp);
     
-    await portService.getOrCreateDailyChartEntry(ctx, portVault, currentExchangeRate, currentTimestampNum, currentBlock, portVaultApyCharts, startApyCalculationTimestamp);
+    await portService.getOrCreateDailyChartEntry(
+      ctx,
+      portVault,
+      currentExchangeRate,
+      currentTimestampNum,
+      currentBlock,
+      portVaultApyCharts,
+      startApyCalculationTimestamp,
+      portNavUpdates
+    );
   }
 
   // Calculate average APY for 7, 30, and 365 days when synced
