@@ -1,5 +1,5 @@
-module.exports = class Data1774273997140 {
-    name = 'Data1774273997140'
+module.exports = class Data1774276477055 {
+    name = 'Data1774276477055'
 
     async up(db) {
         await db.query(`CREATE TABLE "token" ("id" character varying NOT NULL, "address" text NOT NULL, "network" character varying(16) NOT NULL, "name" text NOT NULL, "symbol" text NOT NULL, "decimals" numeric NOT NULL, "price" numeric NOT NULL, "is_pool_token" boolean NOT NULL, "coin_gecko_id" text, "tvl_multiplier" integer NOT NULL, CONSTRAINT "PK_82fae97f905930df5d62a702fc9" PRIMARY KEY ("id"))`)
@@ -59,7 +59,7 @@ module.exports = class Data1774273997140 {
         await db.query(`CREATE INDEX "IDX_42e23f34b00ffb7cdcc8cadbc3" ON "price_snapshot" ("network") `)
         await db.query(`CREATE TABLE "lge_global_stats" ("id" character varying NOT NULL, "total_points" numeric NOT NULL, "total_deposited" numeric NOT NULL, "network" character varying(16) NOT NULL, CONSTRAINT "PK_fb8a1ca82bf167cc85318de10cc" PRIMARY KEY ("id"))`)
         await db.query(`CREATE INDEX "IDX_202242057c4b06feebcd8736d4" ON "lge_global_stats" ("network") `)
-        await db.query(`CREATE TABLE "nara_global_stats" ("id" character varying NOT NULL, "network" character varying(16) NOT NULL, "nara_usd_supply" numeric NOT NULL, "nara_usd_supply_formatted" numeric NOT NULL, "nara_usd_decimals" integer NOT NULL, "reserve_fund_formatted" numeric NOT NULL, "protocol_backing_ratio" numeric NOT NULL, "percentage_staked" numeric NOT NULL, "updated_at" numeric NOT NULL, CONSTRAINT "PK_ca6437959632f20249ff22d3050" PRIMARY KEY ("id"))`)
+        await db.query(`CREATE TABLE "nara_global_stats" ("id" character varying NOT NULL, "network" character varying(16) NOT NULL, "nara_usd_supply" numeric NOT NULL, "nara_usd_supply_formatted" numeric NOT NULL, "nara_usd_decimals" integer NOT NULL, "reserve_fund_formatted" numeric NOT NULL, "protocol_backing_ratio" numeric NOT NULL, "percentage_staked" numeric NOT NULL, "investment_assets_formatted" numeric NOT NULL, "cash_and_equivalents_formatted" numeric NOT NULL, "total_assets_formatted" numeric NOT NULL, "weighted_apy7d" numeric NOT NULL, "weighted_tenor_days" integer, "updated_at" numeric NOT NULL, CONSTRAINT "PK_ca6437959632f20249ff22d3050" PRIMARY KEY ("id"))`)
         await db.query(`CREATE INDEX "IDX_49add277f5c2a04994682fe6bc" ON "nara_global_stats" ("network") `)
         await db.query(`CREATE TABLE "nara_supply_chart_point" ("id" character varying NOT NULL, "network" character varying(16) NOT NULL, "timestamp" numeric NOT NULL, "block" numeric NOT NULL, "nara_usd_supply" numeric NOT NULL, "nara_usd_supply_formatted" numeric NOT NULL, CONSTRAINT "PK_63da7b0b67d4e53729146d5a089" PRIMARY KEY ("id"))`)
         await db.query(`CREATE INDEX "IDX_1cfd9f5fb99a6c2c36c24c1de0" ON "nara_supply_chart_point" ("network") `)

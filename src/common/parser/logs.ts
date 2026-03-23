@@ -506,7 +506,7 @@ export async function parseContext(
 
   ({ portVaults } = await portService.updateAllVaultTvl(ctx, portVaults, config))
 
-  naraGlobalStats = await naraService.updateGlobalStats(ctx, config, naraGlobalStats)
+  naraGlobalStats = await naraService.updateGlobalStats(ctx, config, naraGlobalStats, portVaults, portNavUpdates)
 
   await ctx.store.upsert([...currencies.values()])
   await ctx.store.upsert([...users.values()])

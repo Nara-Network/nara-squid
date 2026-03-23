@@ -28,10 +28,17 @@ export type NaraReserveFundSource = {
   tokenSymbol: string;
 };
 
+export type NaraInvestmentVaultSource = {
+  vaultAddress: string;
+  tokenAddress?: string;
+};
+
 export type Config = {
   startBlock: number;
   Nara?: {
     ReserveFund?: NaraReserveFundSource[];
+    InvestmentWallet?: string;
+    InvestmentVaults?: NaraInvestmentVaultSource[];
   } | null;
   Port?: {
     Vaults: VaultWithEERConfig[];

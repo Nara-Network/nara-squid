@@ -1,9 +1,10 @@
 import * as ERC20Abi from '../abi/ERC20';
 import { BigDecimal } from '@subsquid/big-decimal';
 import { ProcessorContext } from '../common/processor';
-import { Config, NaraReserveFundSource } from '../common/types';
-import { readContract } from '../helpers/common';
-import { NaraGlobalStats, Network, Token } from '../model';
+import { Config, NaraInvestmentVaultSource, NaraReserveFundSource } from '../common/types';
+import { calculateUsdPriceInBN, convertToBaseTokenAmount, normalizeDecimals, readContract } from '../helpers/common';
+import { NaraGlobalStats, Network, PortNavUpdate, PortVault, PortVaultType, Token } from '../model';
+import { portService } from './port';
 
 const NARA_USD_SYMBOL = 'NaraUSD';
 const NARA_USD_PLUS_SYMBOL = 'NaraUSD+';
@@ -26,6 +27,10 @@ async function getGlobalStats(ctx: ProcessorContext): Promise<NaraGlobalStats> {
     reserveFundFormatted: BigDecimal(0),
     protocolBackingRatio: BigDecimal(0),
     percentageStaked: BigDecimal(0),
+    investmentAssetsFormatted: BigDecimal(0),
+    cashAndEquivalentsFormatted: BigDecimal(0),
+    totalAssetsFormatted: BigDecimal(0),
+    weightedApy7d: 0n,
     updatedAt: 0n,
   });
 }
@@ -117,6 +122,7 @@ async function getMetricsAtBlock(
   reserveFundFormatted: BigDecimal;
   protocolBackingRatio: BigDecimal;
   percentageStaked: BigDecimal;
+  cashAndEquivalentsFormatted: BigDecimal;
   updatedAt: bigint;
 } | null> {
   const naraUsdToken = await getTokenBySymbol(ctx, NARA_USD_SYMBOL);
@@ -160,14 +166,138 @@ async function getMetricsAtBlock(
     reserveFundFormatted: reserveFundFormatted ?? BigDecimal(0),
     protocolBackingRatio,
     percentageStaked,
+    cashAndEquivalentsFormatted: naraUsdSupplyFormatted.add(reserveFundFormatted ?? BigDecimal(0)),
     updatedAt: BigInt(blockTimestamp),
   };
+}
+
+function formatRawAmount(amount: bigint, decimals: number): BigDecimal {
+  return BigDecimal(amount.toString()).div(BigDecimal((10n ** BigInt(decimals)).toString()));
+}
+
+async function getInvestmentValueFormatted(
+  ctx: ProcessorContext,
+  wallet: string,
+  holding: NaraInvestmentVaultSource,
+  blockHeight: number,
+  portVaults: Map<string, PortVault>
+): Promise<BigDecimal> {
+  const vaultAddress = holding.vaultAddress.toLowerCase();
+  const portVault = portVaults.get(vaultAddress) ?? await portService.getPortVaultByAddress(ctx, vaultAddress);
+
+  if (!portVault) {
+    ctx.log.warn(`[NARA] Investment vault ${holding.vaultAddress} not found`);
+    return BigDecimal(0);
+  }
+
+  const tokenAddress = (holding.tokenAddress ?? holding.vaultAddress).toLowerCase();
+  const shareBalance = BigInt(
+    await readContract(
+      ctx,
+      tokenAddress,
+      ERC20Abi,
+      'balanceOf',
+      { account: wallet },
+      blockHeight
+    )
+  );
+
+  if (shareBalance === 0n) {
+    return BigDecimal(0);
+  }
+
+  const shareDecimals = tokenAddress === portVault.address
+    ? portVault.decimals
+    : Number(await readContract(ctx, tokenAddress, ERC20Abi, 'decimals', [], blockHeight));
+
+  const valueBaseRaw = (shareBalance * convertToBaseTokenAmount(portVault.currentNav, BigInt(portVault.baseToken.decimals), BigInt(18))) / BigInt(10 ** shareDecimals);
+  const baseToken = await getTokenBySymbol(ctx, portVault.baseToken.symbol);
+
+  if (!baseToken) {
+    ctx.log.warn(`[NARA] Base token ${portVault.baseToken.symbol} not found for vault ${portVault.address}`);
+    return BigDecimal(0);
+  }
+
+  const priceInBN = calculateUsdPriceInBN(BigInt(10 ** Number(baseToken.decimals)), baseToken.price, BigInt(baseToken.decimals));
+  const valueUsdRaw = (valueBaseRaw * priceInBN) / BigInt(10 ** Number(baseToken.decimals));
+
+  return formatRawAmount(valueUsdRaw, Number(baseToken.decimals));
+}
+
+async function getInvestmentAssetsFormatted(
+  ctx: ProcessorContext,
+  config: Config,
+  portVaults: Map<string, PortVault>,
+  blockHeight: number
+): Promise<BigDecimal> {
+  const wallet = config.Nara?.InvestmentWallet;
+  const investmentVaults = config.Nara?.InvestmentVaults ?? [];
+
+  if (!wallet || investmentVaults.length === 0) {
+    return BigDecimal(0);
+  }
+
+  let totalInvestments = BigDecimal(0);
+
+  for (const holding of investmentVaults) {
+    totalInvestments = totalInvestments.add(
+      await getInvestmentValueFormatted(ctx, wallet, holding, blockHeight, portVaults)
+    );
+  }
+
+  return totalInvestments;
+}
+
+async function getWeightedApy7d(
+  ctx: ProcessorContext,
+  config: Config,
+  portVaults: Map<string, PortVault>,
+  portNavUpdates: Map<string, PortNavUpdate>,
+  currentTimestamp: number
+): Promise<bigint> {
+  let weightedApy = 0n;
+  let totalWeight = 0n;
+
+  for (const portVault of portVaults.values()) {
+    if (portVault.type !== PortVaultType.STANDARD) {
+      continue;
+    }
+
+    const startApyCalculationTimestamp = config.Port?.Vaults?.find((vault) => vault.address.toLowerCase() == portVault.address.toLowerCase())?.StartApyCalculationTimestamp;
+    const tvlWeight = normalizeDecimals(portVault.tvl, Number(portVault.baseToken.decimals), 18);
+
+    if (tvlWeight <= 0n) {
+      continue;
+    }
+
+    const { apr } = await portService.calculateRollingAPR(
+      ctx,
+      portVault.address,
+      portVault.currentNav,
+      currentTimestamp,
+      7,
+      portVault.startedAt,
+      startApyCalculationTimestamp,
+      portNavUpdates
+    );
+
+    if (apr === null) {
+      continue;
+    }
+
+    weightedApy += apr * tvlWeight;
+    totalWeight += tvlWeight;
+  }
+
+  return totalWeight > 0n ? weightedApy / totalWeight : 0n;
 }
 
 async function updateGlobalStats(
   ctx: ProcessorContext,
   config: Config,
-  naraGlobalStats: NaraGlobalStats
+  naraGlobalStats: NaraGlobalStats,
+  portVaults: Map<string, PortVault>,
+  portNavUpdates: Map<string, PortNavUpdate>
 ): Promise<NaraGlobalStats> {
   const isSynced = ctx.isHead && ctx.blocks.length === 1;
 
@@ -186,6 +316,11 @@ async function updateGlobalStats(
   naraGlobalStats.reserveFundFormatted = metrics.reserveFundFormatted;
   naraGlobalStats.protocolBackingRatio = metrics.protocolBackingRatio;
   naraGlobalStats.percentageStaked = metrics.percentageStaked;
+  naraGlobalStats.investmentAssetsFormatted = await getInvestmentAssetsFormatted(ctx, config, portVaults, block.header.height);
+  naraGlobalStats.cashAndEquivalentsFormatted = metrics.cashAndEquivalentsFormatted;
+  naraGlobalStats.totalAssetsFormatted = naraGlobalStats.cashAndEquivalentsFormatted.add(naraGlobalStats.investmentAssetsFormatted);
+  naraGlobalStats.weightedApy7d = await getWeightedApy7d(ctx, config, portVaults, portNavUpdates, block.header.timestamp);
+  naraGlobalStats.weightedTenorDays = null;
   naraGlobalStats.updatedAt = metrics.updatedAt;
 
   return naraGlobalStats;

@@ -33,6 +33,21 @@ export class NaraGlobalStats {
     @BigDecimalColumn_({nullable: false})
     percentageStaked!: BigDecimal
 
+    @BigDecimalColumn_({nullable: false})
+    investmentAssetsFormatted!: BigDecimal
+
+    @BigDecimalColumn_({nullable: false})
+    cashAndEquivalentsFormatted!: BigDecimal
+
+    @BigDecimalColumn_({nullable: false})
+    totalAssetsFormatted!: BigDecimal
+
+    @BigIntColumn_({nullable: false})
+    weightedApy7d!: bigint
+
+    @IntColumn_({nullable: true})
+    weightedTenorDays!: number | undefined | null
+
     @BigIntColumn_({nullable: false})
     updatedAt!: bigint
 }

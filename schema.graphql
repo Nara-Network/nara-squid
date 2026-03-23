@@ -264,6 +264,11 @@ type NaraGlobalStats @entity {
   reserveFundFormatted: BigDecimal!
   protocolBackingRatio: BigDecimal!
   percentageStaked: BigDecimal!
+  investmentAssetsFormatted: BigDecimal!
+  cashAndEquivalentsFormatted: BigDecimal!
+  totalAssetsFormatted: BigDecimal!
+  weightedApy7d: BigInt!
+  weightedTenorDays: Int
   updatedAt: BigInt!
 }
 
