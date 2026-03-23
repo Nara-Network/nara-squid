@@ -10,7 +10,7 @@ export class USDXKPI {
     @PrimaryColumn_()
     id!: string
 
-    @Column_("varchar", {length: 7, nullable: false})
+    @Column_("varchar", {length: 16, nullable: false})
     network!: Network
 
     @BigIntColumn_({nullable: false})

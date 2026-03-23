@@ -22,7 +22,8 @@
 2. Set the required environment variables for local development:
 
    - **CMC_API_KEY** - Obtain from [CoinMarketCap](https://coinmarketcap.com/api/).
-   - **ANKR_API_KEY** - Obtain from [Ankr](https://www.ankr.com/).
+   - **ANKR_API_KEY** - Default Ankr key used by all processors unless a network-specific override is set.
+   - **ANKR_API_KEY_ARBITRUM** - Optional dedicated Ankr key for the Arbitrum processor.
    - **MANAGER_API_KEY** - String header used for API requests (you can use any text you want).
 
 3. Generate the TypeORM entities and migrations:
@@ -55,7 +56,8 @@
 
 ### 3. Running
 
-1. Adjust [`src/config.json`](/Users/fsebaste/Desktop/NARA/squid/src/config.json) with the Arbitrum and Arbitrum Sepolia vault configuration before running a processor. The repository currently keeps both networks disabled until those addresses are added.
+1. Adjust [`src/config.json`](/Users/fsebaste/Desktop/NARA/squid/src/config.json) with the Arbitrum and Arbitrum Sepolia configuration before running a processor. The repository currently keeps both networks disabled until those addresses are added.
+   `Nara.ReserveFund` now accepts a list of `{ "wallet": "...", "tokenSymbol": "..." }` entries used to compute the protocol backing ratio.
 
 2. Start the processor (the migration scripts will be run automatically):
 
@@ -72,12 +74,14 @@
    Check (command.json file) for more details.
    See [docs on database migrations](https://docs.subsquid.io/basics/db-migrations) for more details.
 
-   It is necessary to understand that every processor is independent and has its fallback [see declaration](./src/common/types.ts). By default, all processors are using `Ankr` RPC URL. To be able to change the RPC URL for a specific processor, [Go to the website](https://app.subsquid.io/secrets) and choose the fallback variable `ALCHEMY|BLAST|SQUID` edit the variable and set the network you want to use that fallback.
+   It is necessary to understand that every processor is independent and has its fallback [see declaration](./src/common/types.ts). By default, all processors are using `Ankr` RPC URL. The Arbitrum processor checks `ANKR_API_KEY_ARBITRUM` first and falls back to `ANKR_API_KEY` if no dedicated key is set. To be able to change the RPC URL for a specific processor, [Go to the website](https://app.subsquid.io/secrets) and choose the fallback variable `ALCHEMY|BLAST|SQUID` edit the variable and set the network you want to use that fallback.
    e.g.
 
    ```json
    ALCHEMY_FALLBACK_NETWORKS = ["ARBITRUM", "ARBITRUM_SEPOLIA"]
    ```
+
+   For faster historical backfills, set `INCLUDE_ALL_BLOCKS=false` to process only blocks that match the configured log filters. This reduces sync time substantially, but head-only derived values such as TVL or protocol backing ratio will only refresh when a matching event arrives.
 
    Please keep in mind that we are using that method only in case there are some outages with the existing RPC.
    Current state:

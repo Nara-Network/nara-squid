@@ -22,10 +22,10 @@ export class BridgeTransfer {
     @BigIntColumn_({nullable: false})
     amount!: bigint
 
-    @Column_("varchar", {length: 7, nullable: false})
+    @Column_("varchar", {length: 16, nullable: false})
     destination!: Network
 
-    @Column_("varchar", {length: 7, nullable: false})
+    @Column_("varchar", {length: 16, nullable: false})
     origin!: Network
 
     @Column_("varchar", {length: 10, nullable: false})

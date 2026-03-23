@@ -1,10 +1,38 @@
 {
   "arbitrum": {
-    "startBlock": 999999999,
-    "Port": null
+    "startBlock": 442474975,
+    "Port": {
+      "Strategies": {
+        "AAVE": {
+          "block": 442474975,
+          "address": "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+          "asset": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+        }
+      },
+      "Vaults": [
+        {
+          "block": 442474975,
+          "address": "0x3e22B3E2b17730045bf949361fa137B0fF34FA3c",
+          "Teller": "0xe3258A3dBaAEfd7fDfde5b82C2629B63bE1FdC14",
+          "Accountant": "0xdC52273b9bB60848ECe44a4e9eD635C5776D5754",
+          "AtomicQueue": "0x5Cf9EE4F9f967E983ee6928FDbF2F12e27Eec6A8",
+          "AtomicSolver": "0x5B3A41826A28b6a8ed1c5F5d6052D9dB85428d59",
+          "RolesAuthority": "0x1F4E4121B353d134c0EfB7237d015182Fb036242",
+          "Manager": "0x66D23e2a5889b111A60533F349D950E6EEd10005",
+          "expectedExchangeRateConfig": {
+            "borrowRateBps": 7500,
+            "borrower": "0x03014C3cDaDD8a5A1D8EBa50e35212a53Ba3A504",
+            "assets": [
+              "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+            ]
+          }
+        }
+      ]
+    }
   },
   "arbitrumSepolia": {
     "startBlock": 999999999,
+    "Nara": null,
     "Port": null
   }
 }

@@ -23,8 +23,16 @@ export type VaultWithEERConfig = Vault & {
   expectedExchangeRateConfig?: ExpectedExchangeRateConfig;
 }
 
+export type NaraReserveFundSource = {
+  wallet: string;
+  tokenSymbol: string;
+};
+
 export type Config = {
   startBlock: number;
+  Nara?: {
+    ReserveFund?: NaraReserveFundSource[];
+  } | null;
   Port?: {
     Vaults: VaultWithEERConfig[];
     Strategies?: {
@@ -88,7 +96,15 @@ const blastFallbacks = JSON.parse(process.env.BLAST_FALLBACK_NETWORKS || '[]'); 
 const squidFallbacks = JSON.parse(process.env.SQUID_FALLBACK_NETWORKS || '[]'); // common key
 
 const blastApiKey = process.env.BLAST_API_KEY;
-const ankrApiKey = process.env.ANKR_API_KEY;
+const ankrApiKey = process.env.ANKR_API_KEY!;
+const arbitrumApiKey = process.env.ANKR_API_KEY_ARBITRUM || process.env.ARBITRUM_API_KEY;
+
+function getAnkrApiKey(network: Network): string {
+  if (network === Network.ARBITRUM) {
+    return arbitrumApiKey ?? ankrApiKey;
+  }
+  return ankrApiKey;
+}
 
 export const getRpcUrl = (network: Network, fallbackKey?: any): string | RpcEndpointSettings => {
   if (alchemyFallbacks.includes(network) && fallbackKey) {
@@ -104,7 +120,7 @@ export const getRpcUrl = (network: Network, fallbackKey?: any): string | RpcEndp
     );
   }
   return {
-    url: `https://rpc.ankr.com/${ankrSlugByNetwork[network as keyof typeof ankrSlugByNetwork]}/${ankrApiKey}`,
+    url: `https://rpc.ankr.com/${ankrSlugByNetwork[network as keyof typeof ankrSlugByNetwork]}/${getAnkrApiKey(network)}`,
     rateLimit: 100,
     maxBatchCallSize: 1000,
   };

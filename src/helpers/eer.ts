@@ -73,7 +73,11 @@ export function getUnionAssets(config: Config): string[] {
  * Since we filter by topic1/topic2 in processor, one of them must be the vault
  * Returns the vault address if found, undefined otherwise
  */
-export function getVaultAddressFromTransferLog(config: Config, log: { topics: string[] }): string | undefined {
+export function getVaultAddressFromTransferLog(
+  config: Config,
+  log: { topics: string[] },
+  blockHeight?: number
+): string | undefined {
   // Transfer event: topic0 = Transfer signature, topic1 = from, topic2 = to
   if (!log.topics || log.topics.length < 3) {
     return undefined;
@@ -85,11 +89,17 @@ export function getVaultAddressFromTransferLog(config: Config, log: { topics: st
   const from = '0x' + fromTopic.slice(-40).toLowerCase();
   const to = '0x' + toTopic.slice(-40).toLowerCase();
 
-  // Check which one is a configured vault
-  if (isConfiguredVault(config, from)) {
+  const isActiveConfiguredVault = (address: string) =>
+    config.Port?.Vaults?.some((vault) =>
+      vault.address.toLowerCase() === address &&
+      vault.expectedExchangeRateConfig !== undefined &&
+      (blockHeight === undefined || vault.block <= blockHeight)
+    ) ?? false;
+
+  if (isActiveConfiguredVault(from)) {
     return from;
   }
-  if (isConfiguredVault(config, to)) {
+  if (isActiveConfiguredVault(to)) {
     return to;
   }
 

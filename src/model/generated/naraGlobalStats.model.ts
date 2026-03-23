@@ -25,6 +25,12 @@ export class NaraGlobalStats {
     naraUsdDecimals!: number
 
     @BigDecimalColumn_({nullable: false})
+    reserveFundFormatted!: BigDecimal
+
+    @BigDecimalColumn_({nullable: false})
+    protocolBackingRatio!: BigDecimal
+
+    @BigDecimalColumn_({nullable: false})
     percentageStaked!: BigDecimal
 
     @BigIntColumn_({nullable: false})

@@ -16,7 +16,7 @@ export class Token {
     address!: string
 
     @Index_()
-    @Column_("varchar", {length: 7, nullable: false})
+    @Column_("varchar", {length: 16, nullable: false})
     network!: Network
 
     @StringColumn_({nullable: false})

@@ -261,6 +261,8 @@ type NaraGlobalStats @entity {
   naraUsdSupply: BigInt!
   naraUsdSupplyFormatted: BigDecimal!
   naraUsdDecimals: Int!
+  reserveFundFormatted: BigDecimal!
+  protocolBackingRatio: BigDecimal!
   percentageStaked: BigDecimal!
   updatedAt: BigInt!
 }

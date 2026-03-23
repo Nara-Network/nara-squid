@@ -44,12 +44,17 @@ function padAddress(address: string) {
   return '0x' + address.slice(2).toLowerCase().padStart(64, '0');
 }
 
+function shouldIncludeAllBlocks(): boolean {
+  return process.env.INCLUDE_ALL_BLOCKS !== 'false';
+}
+
 export function generateProcessor(
   src: { archive?: GatewaySettings | string; chain: RpcEndpointSettings | string, rateLimit?: number, maxBatchCallSize?: number },
   config: Config,
   finalityConfirmations: number | null
 ) {
   const { startBlock, Port } = config;
+  const includeAllBlocks = shouldIncludeAllBlocks();
 
   const processor = new EvmBatchProcessor()
     .setDataSource(src)
@@ -59,12 +64,15 @@ export function generateProcessor(
       headPollInterval: 2000,
     })
     .setFields(fields)
-    .includeAllBlocks({
-      from: startBlock,
-    })
     .setBlockRange({
       from: startBlock,
     });
+
+  if (includeAllBlocks) {
+    processor.includeAllBlocks({
+      from: startBlock,
+    });
+  }
 
   if (Port) {
     Port.Vaults.forEach((vault) => {

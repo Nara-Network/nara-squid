@@ -21,10 +21,10 @@ export class BridgeTransaction {
     @StringColumn_({nullable: true})
     destAccount!: string | undefined | null
 
-    @Column_("varchar", {length: 7, nullable: false})
+    @Column_("varchar", {length: 16, nullable: false})
     srcChain!: Network
 
-    @Column_("varchar", {length: 7, nullable: false})
+    @Column_("varchar", {length: 16, nullable: false})
     destChain!: Network
 
     @BigIntColumn_({nullable: false})

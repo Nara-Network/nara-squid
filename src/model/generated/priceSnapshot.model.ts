@@ -24,6 +24,6 @@ export class PriceSnapshot {
     timestamp!: bigint
 
     @Index_()
-    @Column_("varchar", {length: 7, nullable: false})
+    @Column_("varchar", {length: 16, nullable: false})
     network!: Network
 }

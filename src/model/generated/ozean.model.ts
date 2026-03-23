@@ -23,7 +23,7 @@ export class Ozean {
     @StringColumn_({nullable: false})
     symbol!: string
 
-    @Column_("varchar", {length: 7, nullable: false})
+    @Column_("varchar", {length: 16, nullable: false})
     network!: Network
 
     @Column_("varchar", {length: 18, nullable: false})

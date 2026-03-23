@@ -23,7 +23,7 @@ export class PortVault {
     @BigIntColumn_({nullable: false})
     startedAt!: bigint
 
-    @Column_("varchar", {length: 7, nullable: false})
+    @Column_("varchar", {length: 16, nullable: false})
     network!: Network
 
     @StringColumn_({nullable: false})

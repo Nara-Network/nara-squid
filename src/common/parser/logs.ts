@@ -44,6 +44,14 @@ import { eerService } from '../../services/eer';
 import { naraService } from '../../services/nara';
 import { floorToHour } from '../utils/time';
 
+function getActiveVaults(config: Config, blockHeight: number) {
+  return config.Port?.Vaults?.filter((vault) => vault.block <= blockHeight) ?? []
+}
+
+function shouldIncludeAllBlocks(): boolean {
+  return process.env.INCLUDE_ALL_BLOCKS !== 'false';
+}
+
 export async function parseContext(
   ctx: ProcessorContext,
   config: Config,
@@ -102,31 +110,34 @@ export async function parseContext(
   const firstHeight = sortedBlocks[0].header.height
   const lastHeight = sortedBlocks[sortedBlocks.length - 1].header.height
   const actualCount = sortedBlocks.length
-  const expectedCount = lastHeight - firstHeight + 1
+  const includeAllBlocks = shouldIncludeAllBlocks()
+  const expectedCount = includeAllBlocks ? lastHeight - firstHeight + 1 : actualCount
 
-  // Check for gaps
-  let gapsFound = false
-  for (let i = 1; i < sortedBlocks.length; i++) {
-    const prevHeight = sortedBlocks[i - 1].header.height
-    const currHeight = sortedBlocks[i].header.height
-    if (currHeight !== prevHeight + 1) {
-      const missingCount = currHeight - prevHeight - 1
-      gapsFound = true
-      ctx.log.error(
-        `BLOCK_GAP_DETECTED prev=${prevHeight} next=${currHeight} missing=${missingCount}`
-      )
-      if (process.env.BLOCK_GAP_STRICT_MODE === 'true') {
-        throw new Error(
-          `Block gap detected: prev=${prevHeight} next=${currHeight} missing=${missingCount}`
+  if (includeAllBlocks) {
+    for (let i = 1; i < sortedBlocks.length; i++) {
+      const prevHeight = sortedBlocks[i - 1].header.height
+      const currHeight = sortedBlocks[i].header.height
+      if (currHeight !== prevHeight + 1) {
+        const missingCount = currHeight - prevHeight - 1
+        ctx.log.error(
+          `BLOCK_GAP_DETECTED prev=${prevHeight} next=${currHeight} missing=${missingCount}`
         )
+        if (process.env.BLOCK_GAP_STRICT_MODE === 'true') {
+          throw new Error(
+            `Block gap detected: prev=${prevHeight} next=${currHeight} missing=${missingCount}`
+          )
+        }
       }
     }
-  }
 
-  // Log batch coverage
-  ctx.log.info(
-    `BATCH_BLOCKS first=${firstHeight} last=${lastHeight} count=${actualCount} expected=${expectedCount}`
-  )
+    ctx.log.info(
+      `BATCH_BLOCKS first=${firstHeight} last=${lastHeight} count=${actualCount} expected=${expectedCount}`
+    )
+  } else {
+    ctx.log.info(
+      `FILTERED_BATCH_BLOCKS first=${firstHeight} last=${lastHeight} delivered=${actualCount}`
+    )
+  }
 
   // Create BlockBatchAudit entity
   const batchAuditId = `${ctx.syncedNetwork}-${firstHeight}-${batchStartTime}`
@@ -144,8 +155,20 @@ export async function parseContext(
   let syncedBlock = ctx.blocks[0].header.height
 
   for (let block of ctx.blocks) {
+    const activeVaults = getActiveVaults(config, block.header.height)
+    const activeAaveStrategy =
+      config.Port?.Strategies?.AAVE && config.Port.Strategies.AAVE.block <= block.header.height
+        ? config.Port.Strategies.AAVE
+        : undefined
+    const activeCompoundStrategy =
+      config.Port?.Strategies?.COMPOUND && config.Port.Strategies.COMPOUND.block <= block.header.height
+        ? config.Port.Strategies.COMPOUND
+        : undefined
+    const activeClearpoolStrategies =
+      config.Port?.Strategies?.CLEARPOOL?.filter((strategy) => strategy.block <= block.header.height) ?? []
+
     for (let log of block.logs) {
-      if (config.Port && config.Port.Vaults?.some((vault) => vault.address.toLowerCase() == log.address)) {
+      if (activeVaults.some((vault) => vault.address.toLowerCase() == log.address)) {
         switch (log.topics[0]) {
           case BoringVaultAbi.events.Enter.topic: {
             ; ({ portDeposits, users, portVaults, portGlobalStats, portVaultTransactionHistories } =
@@ -164,7 +187,7 @@ export async function parseContext(
         }
       }
 
-      if (config.Port && config.Port.Vaults?.some((vault) => vault.AtomicQueue.toLowerCase() == log.address)) {
+      if (activeVaults.some((vault) => vault.AtomicQueue.toLowerCase() == log.address)) {
         switch (log.topics[0]) {
           case AtomicQueueAbi.events.AtomicRequestUpdated.topic: {
             ; ({ portWithdrawalRequests, users, portVaults, portVaultTransactionHistories } =
@@ -203,7 +226,7 @@ export async function parseContext(
         }
       }
 
-      if (config.Port && config.Port.Vaults?.some((vault) => vault.Teller.toLowerCase() == log.address)) {
+      if (activeVaults.some((vault) => vault.Teller.toLowerCase() == log.address)) {
         switch (log.topics[0]) {
           case TellerAbi.events.Paused.topic: {
             ; ({ portVaults, portVaultStatusUpdates, portVaultActivities } = await parserService.parseVaultStatusUpdate(
@@ -254,7 +277,7 @@ export async function parseContext(
         }
       }
 
-      if (config.Port && config.Port.Vaults?.some((vault) => vault.Accountant.toLowerCase() == log.address)) {
+      if (activeVaults.some((vault) => vault.Accountant.toLowerCase() == log.address)) {
         switch (log.topics[0]) {
           case AccountantAbi.events.ExchangeRateUpdated.topic: {
             ; ({ portNavUpdates, portVaults, portVaultActivities, portVaultAPYs, portVaultApyCharts } = await parserService.parseNavUpdate(
@@ -308,7 +331,7 @@ export async function parseContext(
         }
       }
 
-      if (config.Port && config.Port.Strategies?.AAVE?.address.toLowerCase() == log.address) {
+      if (activeAaveStrategy?.address.toLowerCase() == log.address) {
         switch (log.topics[0]) {
           case AaveV3PoolAbi.events.Supply.topic: {
             ; ({ portVaults, portVaultActivities, fundsDiverted } = await parserService.parseFundsDiverted(
@@ -336,7 +359,7 @@ export async function parseContext(
         }
       }
 
-      if (config.Port && config.Port.Strategies?.CLEARPOOL?.some((strategy) => strategy.address.toLowerCase() == log.address)) {
+      if (activeClearpoolStrategies.some((strategy) => strategy.address.toLowerCase() == log.address)) {
         switch (log.topics[0]) {
           case BoringVaultAbi.events.Enter.topic: {
             ; ({
@@ -356,7 +379,7 @@ export async function parseContext(
         }
       }
 
-      if (config.Port && config.Port.Strategies?.CLEARPOOL?.some((strategy) => strategy.AtomicQueue.toLowerCase() == log.address)) {
+      if (activeClearpoolStrategies.some((strategy) => strategy.AtomicQueue.toLowerCase() == log.address)) {
         switch (log.topics[0]) {
           case AtomicQueueAbi.events.AtomicRequestFulfilled.topic: {
             ; ({
@@ -376,7 +399,7 @@ export async function parseContext(
         }
       }
 
-      if (config.Port && config.Port.Strategies?.COMPOUND?.address.toLowerCase() == log.address) {
+      if (activeCompoundStrategy?.address.toLowerCase() == log.address) {
         switch (log.topics[0]) {
           case CompoundUSDCAbi.events.Supply.topic: {
             ; ({
@@ -413,7 +436,7 @@ export async function parseContext(
       }
 
       if (log.topics[0] === ERC20Abi.events.Transfer.topic) {
-        const vaultAddress = getVaultAddressFromTransferLog(config, log);
+        const vaultAddress = getVaultAddressFromTransferLog(config, log, block.header.height);
         const isRequestFulfilled = block.logs.some(l => l.topics[0] === AtomicQueueAbi.events.AtomicRequestFulfilled.topic);
         if (vaultAddress && !isRequestFulfilled) {
           ; ({ portVaults, managerWithdraws, managerDeposits, portVaultActivities } = await parserService.parseBorrowerTransfer(
@@ -456,7 +479,7 @@ export async function parseContext(
 
   ({ portVaults } = await portService.updateAllVaultTvl(ctx, portVaults, config))
 
-  naraGlobalStats = await naraService.updateGlobalStats(ctx, naraGlobalStats)
+  naraGlobalStats = await naraService.updateGlobalStats(ctx, config, naraGlobalStats)
 
   await ctx.store.upsert([...currencies.values()])
   await ctx.store.upsert([...users.values()])

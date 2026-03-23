@@ -1,6 +1,7 @@
 import * as ERC20Abi from '../abi/ERC20';
 import { BigDecimal } from '@subsquid/big-decimal';
 import { ProcessorContext } from '../common/processor';
+import { Config, NaraReserveFundSource } from '../common/types';
 import { readContract } from '../helpers/common';
 import { NaraGlobalStats, Network, Token } from '../model';
 
@@ -22,6 +23,8 @@ async function getGlobalStats(ctx: ProcessorContext): Promise<NaraGlobalStats> {
     naraUsdSupply: 0n,
     naraUsdSupplyFormatted: BigDecimal(0),
     naraUsdDecimals: 18,
+    reserveFundFormatted: BigDecimal(0),
+    protocolBackingRatio: BigDecimal(0),
     percentageStaked: BigDecimal(0),
     updatedAt: 0n,
   });
@@ -60,8 +63,49 @@ async function getFormattedSupply(
   return { rawSupply, formattedSupply, decimals };
 }
 
+async function getReserveFundFormatted(
+  ctx: ProcessorContext,
+  reserveFundSources: NaraReserveFundSource[]
+): Promise<BigDecimal | null> {
+  if (reserveFundSources.length === 0) {
+    return null;
+  }
+
+  let totalReserveFund = BigDecimal(0);
+
+  for (const source of reserveFundSources) {
+    const token = await getTokenBySymbol(ctx, source.tokenSymbol);
+    if (!token) {
+      ctx.log.warn(
+        `[NARA] Reserve fund token ${source.tokenSymbol} not found for network=${ctx.syncedNetwork}`
+      );
+      return null;
+    }
+
+    const rawBalance = BigInt(
+      await readContract(
+        ctx,
+        token.address,
+        ERC20Abi,
+        'balanceOf',
+        { account: source.wallet },
+        ctx.blocks[ctx.blocks.length - 1].header.height
+      )
+    );
+
+    const formattedBalance = BigDecimal(rawBalance.toString()).div(
+      BigDecimal((10n ** BigInt(token.decimals)).toString())
+    );
+
+    totalReserveFund = totalReserveFund.add(formattedBalance);
+  }
+
+  return totalReserveFund;
+}
+
 async function updateGlobalStats(
   ctx: ProcessorContext,
+  config: Config,
   naraGlobalStats: NaraGlobalStats
 ): Promise<NaraGlobalStats> {
   const isSynced = ctx.isHead && ctx.blocks.length === 1;
@@ -89,15 +133,28 @@ async function updateGlobalStats(
     decimals: naraUsdDecimals,
   } = await getFormattedSupply(ctx, naraUsdToken);
   const { formattedSupply: naraUsdPlusSupplyFormatted } = await getFormattedSupply(ctx, naraUsdPlusToken);
+  const reserveFundSources = config.Nara?.ReserveFund ?? [];
+  const reserveFundFormatted = await getReserveFundFormatted(ctx, reserveFundSources);
 
   const percentageStaked = naraUsdSupply > 0n
     ? naraUsdPlusSupplyFormatted.mul(BigDecimal(100)).div(naraUsdSupplyFormatted)
     : BigDecimal(0);
+  const protocolBackingRatio = reserveFundFormatted !== null && naraUsdSupply > 0n
+    ? naraUsdSupplyFormatted.add(reserveFundFormatted).div(naraUsdSupplyFormatted)
+    : BigDecimal(0);
+
+  if (reserveFundFormatted === null) {
+    ctx.log.warn(
+      `[NARA] Reserve fund is not configured for network=${ctx.syncedNetwork}; protocol backing ratio will remain 0`
+    );
+  }
 
   naraGlobalStats.network = ctx.syncedNetwork as Network;
   naraGlobalStats.naraUsdSupply = naraUsdSupply;
   naraGlobalStats.naraUsdSupplyFormatted = naraUsdSupplyFormatted;
   naraGlobalStats.naraUsdDecimals = naraUsdDecimals;
+  naraGlobalStats.reserveFundFormatted = reserveFundFormatted ?? BigDecimal(0);
+  naraGlobalStats.protocolBackingRatio = protocolBackingRatio;
   naraGlobalStats.percentageStaked = percentageStaked;
   naraGlobalStats.updatedAt = BigInt(ctx.blocks[ctx.blocks.length - 1].header.timestamp);
 

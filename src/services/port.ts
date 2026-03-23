@@ -387,7 +387,7 @@ async function getOrCreateDailyChartEntry(
   });
 
   const memRecentCharts = Array.from(portVaultApyCharts.values())
-    .filter(chart => chart.vault.address === vault.address)
+    .filter(chart => chart.vault?.address === vault.address)
     .sort((a, b) => Number(b.timestamp) - Number(a.timestamp));
 
   const lastChart = memRecentCharts.length > 0 
@@ -417,7 +417,7 @@ async function getOrCreateDailyChartEntry(
         });
 
         const memForDay = Array.from(portVaultApyCharts.values()).filter(
-          chart => chart.vault.address === vault.address && 
+          chart => chart.vault?.address === vault.address && 
                    Number(chart.timestamp) >= dayStart && 
                    Number(chart.timestamp) <= dayToBackfill
         );
@@ -469,7 +469,7 @@ async function getOrCreateDailyChartEntry(
 
   // Check if we already have an entry for today (in memory or database)
   const memEntryToday = Array.from(portVaultApyCharts.values()).find(
-    chart => chart.vault.address === vault.address && 
+    chart => chart.vault?.address === vault.address && 
              Number(chart.timestamp) >= currentDayStart && 
              Number(chart.timestamp) <= currentDayEnd
   );
@@ -503,6 +503,7 @@ async function getOrCreateDailyChartEntry(
       vault: { address: vault.address, network: ctx.syncedNetwork },
       timestamp: MoreThanOrEqual(BigInt(currentDayStart)),
     },
+    relations: { vault: true },
     order: { timestamp: 'ASC' },
     take: 1
   });
@@ -664,7 +665,7 @@ async function updateAllVaultApyCharts(
       // Check if yesterday already has a chart entry (from NAV updates)
       const yesterdayDayStart = yesterdayEnd - (24 * 60 * 60 * 1000) + 1;
       const memEntryYesterday = Array.from(portVaultApyCharts.values()).find(
-        chart => chart.vault.address === portVault.address && 
+        chart => chart.vault?.address === portVault.address && 
                  Number(chart.timestamp) >= yesterdayDayStart && 
                  Number(chart.timestamp) <= yesterdayEnd
       );
