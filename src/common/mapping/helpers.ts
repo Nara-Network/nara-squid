@@ -7,7 +7,6 @@ import { Block, Log, ProcessorContext } from '../processor';
 import * as erc20Abi from '../../abi/ERC20';
 import { DateTime } from 'luxon';
 import { toWei } from './decimal';
-import { defineChain } from 'viem';
 import { tokensService } from '../../services/tokens';
 import { arbitrum, arbitrumSepolia } from 'viem/chains';
 
@@ -18,7 +17,6 @@ export const PRIME_YEAR = BigInt(360 * 24 * 60 * 60);
 export const DAY = 24 * 60 * 60 * 1000;
 export const MAX_VOTE_POWER = BigInt(15e16);
 export const MULTIPLIER = BigInt(1e18);
-export const OZEANREWARDRATE = BigInt(20e16);
 export const MAX_APPROVAL_TIME = 60 * 60 * 1000; // 1hr
 export const MAX_FINALIZE_TIME = 7 * DAY;
 export type ProcessorProps = {
@@ -70,44 +68,8 @@ export function groupBy<K, V>(array: V[], grouper: (item: V) => K) {
   }, new Map<K, V[]>());
 }
 
-export function getOperationId(prefix: string, index: number, hash: string) {
-  return `${prefix}-tx_${index}@${hash}`;
-}
-
-export function getVirtualOperationId(
-  txIndex: number,
-  txHash: string,
-  account: string,
-  index: number = 0
-) {
-  return `virtual_${txIndex}@${txHash}_${account}_${index}`;
-}
-
-export function getBidId(index: number, hash: string) {
-  return `${index}@${hash}`;
-}
-
-export function getRewardAssetId(asset: string, pool: string) {
-  return `${asset}@${pool}`;
-}
-
-export function parseRewardAssetId(rewardAssetId: string) {
-  return rewardAssetId.split('@');
-}
-
 export function getTokenId(asset: string, syncedNetwork: Network) {
   return `${asset}_${syncedNetwork}`;
-}
-
-export function getBridgeTokenId(tokenId: string) {
-  return `bridge_token_${tokenId}`;
-}
-
-export function getTrackerId(syncedNetwork: Network) {
-  return `clearpool_change_tracker_${syncedNetwork}`;
-}
-export function getStakeId(stakeId: string, syncedNetwork: Network, ozean: string = '') {
-  return `stake_${stakeId}_${syncedNetwork}${ozean ? `_${ozean}` : ''}`;
 }
 
 export async function getCurrencyInfo(
@@ -222,47 +184,6 @@ export const rewardRateToAPR = (
   const apr = usdRewardPerYear.mul(multiplier).div(poolSupply);
   return apr;
 };
-
-// ozean
-export function calcOzeanReward(curentTs: number, lastUpdate: bigint, amount: bigint): BigDecimal {
-  let ozeanReward = BigDecimal(0);
-
-  if (lastUpdate !== BigInt(0)) {
-    const timeDelta = BigInt(curentTs) - lastUpdate; // in miliseconds
-    const apr = OZEANREWARDRATE / YEAR;
-    ozeanReward = ozeanReward.add(
-      BigDecimal(apr).mul(timeDelta).div(1000).mul(amount).div(MULTIPLIER)
-    );
-  }
-  return ozeanReward;
-}
-
-// export const ozean_testnet = defineChain({
-//   id: 7849306,
-//   name: 'Ozean Testnet',
-//   nativeCurrency: {
-//     decimals: 18,
-//     name: 'USDX',
-//     symbol: 'USDX',
-//   },
-//   rpcUrls: {
-//     default: { http: ['https://ozean-testnet.rpc.caldera.xyz/http'] },
-//   },
-//   blockExplorers: {
-//     default: {
-//       name: 'Ozean Testnet explorer',
-//       url: 'https://ozean-testnet.explorer.caldera.xyz/',
-//       apiUrl: 'https://ozean-testnet.explorer.caldera.xyz/api/v2/',
-//     },
-//   },
-//   contracts: {
-//     multicall3: {
-//       address: '0xca11bde05977b3631167028862be2a173976ca11',
-//       blockCreated: 1802407,
-//     },
-//   },
-//   testnet: true,
-// });
 
 export const SupportedChainIds = [arbitrumSepolia.id, arbitrum.id] as const;
 export type SupportedChainId = typeof SupportedChainIds[number];

@@ -107,7 +107,7 @@ const ankrApiKey = process.env.ANKR_API_KEY!;
 const arbitrumApiKey = process.env.ANKR_API_KEY_ARBITRUM || process.env.ARBITRUM_API_KEY;
 
 function getAnkrApiKey(network: Network): string {
-  if (network === Network.ARBITRUM) {
+  if (network === Network.ARBITRUM || network === Network.ARBITRUM_SEPOLIA) {
     return arbitrumApiKey ?? ankrApiKey;
   }
   return ankrApiKey;
@@ -137,5 +137,5 @@ const MINUTE = 60;
 
 export const poolSizeDelayByNetwork = {
   ARBITRUM: MINUTE,
-  ARBITRUM_SEPOLIA: 2.5 * MINUTE,
+  ARBITRUM_SEPOLIA: MINUTE,
 };

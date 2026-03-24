@@ -8,6 +8,7 @@ const logsProcessorGenerator = (configurator: Configurator) => {
   return generateProcessor(
     configurator.rpc,
     configurator.configFile,
+    configurator.network,
     configurator.finalityConfirmations
   );
 };

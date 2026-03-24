@@ -31,7 +31,7 @@
     }
   },
   "arbitrumSepolia": {
-    "startBlock": 999999999,
+    "startBlock": 234938425,
     "Nara": null,
     "Port": null
   }

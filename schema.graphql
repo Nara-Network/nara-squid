@@ -3,19 +3,9 @@ enum Network {
   ARBITRUM_SEPOLIA
 }
 
-enum PoolStatus {
-  Open
-  Active
-  Overdue
-  Warning
-  ProvisionalDefault
-  Default
-  Closed
-}
-
 type Token @entity {
   id: ID! @index
-  address: String! @index # asset address
+  address: String! @index
   network: Network! @index
   name: String!
   symbol: String! @index
@@ -26,233 +16,13 @@ type Token @entity {
   tvlMultiplier: Int!
 }
 
-type RewardToken @entity {
-  id: ID! @index
-  token: Token!
-  ozean: Ozean @index
-  rate: BigInt!
-}
-
-enum OperationType {
-  #common
-  Repaid
-  Deposited
-  Withdrawal
-  PoolClosed
-
-  # virtual
-  TransferIn # cpTokens
-  TransferOut # cpTokens
-  InterestAccrued # together with repayment
-  PenaltyInterestAccrued # together with repayment
-  InterestEarned
-  PenaltyInterestEarned
-
-  # staking
-  Staked
-  Unstaked
-  YieldDistributed
-}
-
-enum OperationMedium {
-  ON_CHAIN
-  VIRTUAL
-  OFF_CHAIN
-}
-
-enum OperationPersona {
-  POOL
-  LENDER
-  BORROWER
-}
-
-type Operation @entity {
-  id: ID! @index
-  hash: String
-  ozean: Ozean @index
-  type: OperationType!
-  currency: Token!
-  medium: OperationMedium!
-  persona: [OperationPersona!]!
-  amount: BigInt
-  createdAt: BigInt!
-  snapshot: OperationSnapshot
-  account: String! @index
-}
-
-type OperationSnapshot {
-  apr: BigInt!
-  exchangeRate: BigInt!
-  # account balance, if is virtual event balance is in cpTokens
-  balance: BigInt!
-}
-
-type Stake @entity {
-  id: ID! @index
-  owner: String! @index
-  amount: BigInt!
-  createdAt: BigInt!
-  unstaked: Boolean!
-  withdrawnReward: BigInt!
-  withdrawableReward: BigInt!
-  ozean: Ozean @index
-}
-
-# Ozean staking pools
-type Ozean @entity {
-  id: ID! @index #ozean oracle id
-  asset: Token!
-  symbol: String!
-  network: Network!
-  status: PoolStatus!
-  totalStake: BigInt!
-  totalUSDXEarned: BigInt!
-  exchangeRate: BigInt!
-  apr: BigDecimal!
-  lastUpdatedAt: BigInt!
-  operations: [Operation!]! @derivedFrom(field: "ozean")
-  stakes: [Stake!]! @derivedFrom(field: "ozean")
-  rewardAssets: [RewardToken!] @derivedFrom(field: "ozean")
-}
-# bridge status
-enum BridgeStatus {
-  INPROGRESS
-  COMPLETED
-  PROVEN
-}
-
-type BridgeTransfer @entity {
-  id: ID! @index
-  recipient: String!
-  sender: String! @index
-  amount: BigInt!
-  destination: Network!
-  origin: Network!
-  status: BridgeStatus!
-  fee: BigInt!
-  amountSent: BigInt!
-  amountReceived: BigInt!
-  token: Token
-  originTxHash: String @index
-  destinationTxHash: String
-  provenTxHash: String
-  isTestnet: Boolean!
-  createdAt: BigInt!
-  receivedAt: BigInt
-  provenAt: BigInt
-  finalizedAt: BigInt
-}
-
-#Ozean Bridge
-type BridgeTransaction @entity {
-  id: ID! @index
-  asset: Token!
-  srcAccount: String!
-  destAccount: String
-  srcChain: Network!
-  destChain: Network!
-  amount: BigInt!
-  receivedAmount: BigInt
-  srcTxHash: String!
-  destTxHash: String
-  approvalDate: BigInt!
-  createdAt: BigInt!
-  accumulatedPoints: BigInt!
-}
-
-type BridgeWithdrawal @entity {
-  id: ID!
-  status: BridgeStatus
-  bridge: BridgeTransaction!
-  withdrawalDate: BigInt!
-  approvalTxHash: String
-  withdrawalTxHash: String
-}
-
-type BridgeToken @entity {
-  id: ID! @index
-  depositCap: BigInt!
-  asset: Token!
-}
-
-type USDXKPI @entity {
-  id: ID!
-  network: Network!
-  totalUSDX: BigInt!
-}
-
-# LGE Staking
-
 type User @entity {
-  id: ID! @index # wallet address
+  id: ID! @index
   address: String! @index
-  totalPoints: BigDecimal!
-  referralPoints: BigDecimal!
-  referralCodePoints: BigDecimal!
-  referredUsersPoints: [ReferredUserPoints!]! @derivedFrom(field: "referee")
-  lgePoints: BigDecimal!
-  referralCode: String
-  referredCode: String
-  referredBy: User
-  referredAt: BigInt
-  referredUsers: [User!]! @derivedFrom(field: "referredBy")
-  stakingPositions: [LGEStakingPosition!]! @derivedFrom(field: "user")
-  tvl: BigDecimal!
-  leaderboardPosition: Int!
-  totalBridgeTransfers: BigInt!
   isTestnet: Boolean!
   portWithdrawalRequests: [PortWithdrawalRequest!]! @derivedFrom(field: "user")
   portDeposits: [PortDeposit!]! @derivedFrom(field: "user")
-}
-
-type ReferredUserPoints @entity {
-  network: Network! @index
-  referee: User! @index
-  referredUser: User! @index
-  points: BigDecimal!
-}
-
-type LGEStakingPosition @entity {
-  id: ID! @index
-  user: User! @index
-  amount: BigInt!
-  createdAt: BigInt!
-  updatedAt: BigInt!
-  isActive: Boolean!
-  stakingHistory: [LGEStakingHistory!]! @derivedFrom(field: "position")
-  stakedToken: Token! @index
-  totalPoints: Float!
-  pointsUpdatedAtBlock: BigInt!
-}
-
-type LGEStakingHistory @entity {
-  id: ID! @index
-  position: LGEStakingPosition! @index
-  timestamp: BigInt!
-  action: LGEStakingAction!
-  amount: BigInt!
-  txHash: String!
-  block: BigInt!
-}
-
-enum LGEStakingAction {
-  DEPOSIT
-  WITHDRAW
-  CLAIM_REWARDS
-}
-
-type PriceSnapshot @entity {
-  id: ID! @index
-  token: Token! @index
-  price: BigDecimal!
-  timestamp: BigInt! @index
-  network: Network! @index
-}
-
-type LgeGlobalStats @entity {
-  totalPoints: BigDecimal!
-  totalDeposited: BigDecimal!
-  network: Network! @index
+  naraRedemptions: [NaraRedemption!]! @derivedFrom(field: "user")
 }
 
 type NaraGlobalStats @entity {
@@ -300,7 +70,47 @@ type NaraApyChartPoint @entity {
   apy30d: BigInt!
 }
 
-# Port
+enum NaraRedemptionAction {
+  INSTANT_REDEEM
+  REQUESTED
+  COMPLETED
+}
+
+enum NaraRedemptionStatus {
+  REQUESTED
+  COMPLETED
+}
+
+type NaraRedemption @entity {
+  id: ID! @index
+  user: User! @index
+  status: NaraRedemptionStatus! @index
+  naraUsdAmount: BigInt!
+  collateralAmount: BigInt
+  collateralAssetAddress: String! @index
+  requestedAt: BigInt!
+  completedAt: BigInt
+  updatedAt: BigInt!
+  activities: [NaraRedemptionActivity!]! @derivedFrom(field: "redemption")
+}
+
+type NaraRedemptionActivity @entity {
+  id: ID! @index
+  redemption: NaraRedemption! @index
+  action: NaraRedemptionAction! @index
+  naraUsdAmount: BigInt!
+  collateralAmount: BigInt
+  collateralAssetAddress: String! @index
+  timestamp: BigInt!
+  txHash: String! @index
+  block: BigInt!
+}
+
+type TotalRequestedAmount @entity {
+  id: ID! @index
+  collateralAddress: String! @index
+  amount: BigInt!
+}
 
 type PortGlobalStats @entity {
   id: ID! @index
@@ -504,10 +314,7 @@ type ExpectedExchangeRate @entity {
   expectedLastAccrualTs: Int!
   expectedLastUpdateTs: Int!
   expectedAssetsBaseRaw: BigInt!
-  # Total borrower liability: principal + accruedBorrowInterest + accruedCommitmentFee
-  # This is the "borrowed" component in netAssets = idle + invested + borrowed
   expectedBorrowedBaseRaw: BigInt!
-  # Borrower principal outstanding (excludes accrued interest and fees)
   expectedBorrowedPrincipalBaseRaw: BigInt!
   expectedExchangeRateBaseRaw: BigInt!
   commitmentFeeAccruedMtdBaseRaw: BigInt!
@@ -520,30 +327,20 @@ type ExpectedExchangeRate @entity {
   expectedRepaymentCreditBaseRaw: BigInt!
   borrowRateBps: BigInt!
   commitmentFeeRateBps: BigInt!
-  # Shares are event-tracked; do not read totalSupply from contract.
-  # Updated ONLY via Enter (increase) and AtomicRequestFulfilled/withdrawal (decrease) events.
   totalSharesTracked: BigInt!
   totalSharesSource: String!
-  # Net assets tracked from external events (Enter deposits, AtomicRequestFulfilled withdrawals).
-  # This is the source of truth for EER calculation. Accrual deltas are applied at update intervals.
-  # Component-based recompute is for diagnostics only, never overwrites this.
   netAssetsTrackedBaseRaw: BigInt!
-  # Simplified EER tracking fields (for time window based calculation mode)
   idleBaseTracked: BigInt!
   investedBaseTracked: BigInt!
   accruedCommitmentFeeBase: BigInt!
   accruedBorrowInterestBase: BigInt!
   lastAccrualBlock: BigInt!
-  # Strategy yield persisted across updates to prevent yield loss on effectiveStrategyValueBase reload
   strategyYieldBase: BigInt!
   lastSnapshotTsUsed: Int!
-  # Remainder accumulation to prevent BigInt truncation drift with small amounts / short time windows
   commitFeeRemainderNumerator: BigInt!
   borrowInterestRemainderNumerator: BigInt!
 }
 
-# EER Snapshot - captures state on each EER calculation
-# Includes ALL fields needed to reproduce Excel calculation in isolation (no hidden state)
 type ExpectedExchangeRateSnapshot @entity {
   id: ID! @index
   vault: PortVault! @index
@@ -553,12 +350,8 @@ type ExpectedExchangeRateSnapshot @entity {
   blockTimestampMs: BigInt!
   nowSec: Int!
   updateTs: Int! @index
-  
-  # Block/time aliases (for Excel reproduction)
-  block: BigInt! # alias of blockHeight
-  blockTimestamp: Int! # alias of nowSec (seconds)
-  
-  # ExpectedExchangeRate fields (matching current structure)
+  block: BigInt!
+  blockTimestamp: Int!
   expectedLastAccrualTs: Int!
   expectedLastUpdateTs: Int!
   expectedAssetsBaseRaw: BigInt!
@@ -584,44 +377,31 @@ type ExpectedExchangeRateSnapshot @entity {
   accruedBorrowInterestBase: BigInt!
   lastAccrualBlock: BigInt!
   utilizationBps: BigInt!
-  
-  # Bases (explicitly named for Excel reproduction)
-  # Note: Some fields duplicate existing ones for clarity (idleBase vs idleBaseTracked, etc.)
   idleBase: BigInt!
-  investedBase: BigInt! # principal invested (alias of investedBaseTracked for clarity)
-  effectiveStrategyValueBase: BigInt! # current diverted value (principal + returns)
+  investedBase: BigInt!
+  effectiveStrategyValueBase: BigInt!
   borrowedPrincipalBase: BigInt!
-  # accruedBorrowInterestBase and accruedCommitmentFeeBase already exist above, not duplicating
-  
-  # Derived (for Excel reproduction)
-  borrowedForTier: BigInt! # principal + interest (NO commitment fee) - used for tier selection
-  borrowedReported: BigInt! # principal + interest + commitment fee - used for NAV/EER
-  utilForTierBps: BigInt! # utilization for tier selection (based on borrowedForTier)
-  utilReportedBps: BigInt! # utilization for reporting (based on borrowedReported)
-  netAssetsBase: BigInt! # net assets = idle + effectiveStrategyValue + borrowedReported
-  eer: BigInt! # expected exchange rate = netAssetsBase / totalSharesTracked
-  
-  # Debugging fields (for Excel comparison and regression testing)
-  totalAssetsBase: BigInt! # idle + invested + borrowedPrincipal (for debugging utilization calculation)
-  dtSeconds: Int! # time delta in seconds for the final accrual segment (lastAccrualTs -> cutoffTs)
-  commitmentFeeAccruedDeltaBase: BigInt! # commitment fee accrued in this update window
-  borrowInterestAccruedDeltaBase: BigInt! # borrow interest accrued in this update window
-  
-  # Tier freezing fields (critical for path-independence)
-  utilForTierBpsStart: BigInt! # utilization at START of window (used for tier selection) - FROZEN for entire window
-  commitFeeRateBpsStart: BigInt! # tier frozen at START of window (used for entire window) - prevents path-dependent behavior
-  
-  # Batch metadata fields (for debugging convergence)
+  borrowedForTier: BigInt!
+  borrowedReported: BigInt!
+  utilForTierBps: BigInt!
+  utilReportedBps: BigInt!
+  netAssetsBase: BigInt!
+  eer: BigInt!
+  totalAssetsBase: BigInt!
+  dtSeconds: Int!
+  commitmentFeeAccruedDeltaBase: BigInt!
+  borrowInterestAccruedDeltaBase: BigInt!
+  utilForTierBpsStart: BigInt!
+  commitFeeRateBpsStart: BigInt!
   batchFirstBlock: BigInt!
   batchLastBlock: BigInt!
   batchCount: Int!
-  hourTs: Int! # hour boundary timestamp (floorToHour(cutoffTs))
-  lastAccrualTsBefore: Int! # lastAccrualTs before update
-  lastAccrualTsAfter: Int! # lastAccrualTs after update
-  utilBpsEnd: BigInt! # utilization at end (alias of utilReportedBps for clarity)
+  hourTs: Int!
+  lastAccrualTsBefore: Int!
+  lastAccrualTsAfter: Int!
+  utilBpsEnd: BigInt!
 }
 
-# Manager Withdraw (drawdown: vault -> borrower)
 type ManagerWithdraw @entity {
   id: ID! @index
   vault: PortVault! @index
@@ -637,7 +417,6 @@ type ManagerWithdraw @entity {
   logIndex: Int!
 }
 
-# Manager Deposit (repayment: borrower -> vault)
 type ManagerDeposit @entity {
   id: ID! @index
   vault: PortVault! @index
@@ -653,7 +432,6 @@ type ManagerDeposit @entity {
   logIndex: Int!
 }
 
-# Borrowed Asset Balance (source of truth for outstanding borrowed per token)
 type BorrowedAssetBalance @entity {
   id: ID! @index
   vault: PortVault! @index
@@ -711,7 +489,6 @@ type StrategyPositionSnapshot @entity {
   txHash: String
 }
 
-# Block Batch Audit - tracks batch coverage for gap detection
 type BlockBatchAudit @entity {
   id: ID! @index
   network: Network! @index

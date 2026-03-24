@@ -25,8 +25,8 @@ deploy:
   processor:
     - name: arbitrum-processor
       cmd: ['node', 'lib/arbitrum/logs']
-    # - name: arbitrum-sepolia-processor
-    #   cmd: ['node', 'lib/arbitrumSepolia/logs']
+    - name: arbitrum-sepolia-processor
+      cmd: ['node', 'lib/arbitrumSepolia/logs']
   api:
     cmd:
       - npx

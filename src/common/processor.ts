@@ -18,7 +18,9 @@ import * as AccountantAbi from '../abi/AccountantWithRateProviders';
 import * as AaveV3PoolAbi from '../abi/AaveV3Pool';
 import * as CompoundUSDCAbi from '../abi/CompoundUSDC';
 import * as ERC20Abi from '../abi/ERC20';
+import * as NaraUSD from '../abi/NaraUSD';
 import { Network } from '../model';
+import { getTrackedTokenAddress } from './mapping/baseTokens';
 
 const fields = {
   log: {
@@ -51,6 +53,7 @@ function shouldIncludeAllBlocks(): boolean {
 export function generateProcessor(
   src: { archive?: GatewaySettings | string; chain: RpcEndpointSettings | string, rateLimit?: number, maxBatchCallSize?: number },
   config: Config,
+  network: Network,
   finalityConfirmations: number | null
 ) {
   const { startBlock, Port } = config;
@@ -174,6 +177,18 @@ export function generateProcessor(
         });
       }
     }
+  }
+
+  const naraUsdAddress = getTrackedTokenAddress(network, 'NaraUSD');
+  if (naraUsdAddress) {
+    processor.addLog({
+      address: [naraUsdAddress],
+      topic0: [
+        NaraUSD.events.Redeem.topic,
+        NaraUSD.events.RedemptionRequested.topic,
+        NaraUSD.events.RedemptionCompleted.topic,
+      ],
+    });
   }
 
   if (finalityConfirmations) {

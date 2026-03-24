@@ -5,6 +5,7 @@ import config from '../config.json';
 
 const configurator: Configurator = {
   rpc: {
+    archive: 'https://v2.archive.subsquid.io/network/arbitrum-sepolia',
     chain: getRpcUrl(Network.ARBITRUM_SEPOLIA),
   },
   network: Network.ARBITRUM_SEPOLIA,

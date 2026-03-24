@@ -23,7 +23,10 @@ import {
   NaraGlobalStats,
   NaraSupplyChartPoint,
   NaraTvlChartPoint,
-  NaraApyChartPoint
+  NaraApyChartPoint,
+  NaraRedemption,
+  NaraRedemptionActivity,
+  TotalRequestedAmount,
 } from '../../model';
 import { ProcessorContext } from '../processor';
 
@@ -34,11 +37,12 @@ import * as TellerAbi from '../../abi/TellerWithMultiAssetSupport';
 import * as AaveV3PoolAbi from '../../abi/AaveV3Pool';
 import * as CompoundUSDCAbi from '../../abi/CompoundUSDC';
 import * as ERC20Abi from '../../abi/ERC20';
+import * as NaraUSD from '../../abi/NaraUSD';
 
 import { Config } from '../types';
 import { toEntityMap } from '../mapping/helpers';
 
-import { initializeTokens } from '../mapping/baseTokens';
+import { getTrackedTokenAddress, initializeTokens } from '../mapping/baseTokens';
 import { portService } from '../../services/port';
 import { strategyService } from '../../services/strategy';
 import { getVaultAddressFromTransferLog } from '../../helpers/eer';
@@ -63,9 +67,11 @@ export async function parseContext(
   batchSizeMulticall: number,
   poolSizeSyncTsDelay: number
 ): Promise<void> {
-  let currencies: Map<string, Token> = await ctx.store
-    .findBy(Token, { network: ctx.syncedNetwork })
-    .then(toEntityMap)
+  await initializeTokens(ctx)
+
+  // let currencies: Map<string, Token> = await ctx.store
+  //   .findBy(Token, { network: ctx.syncedNetwork })
+  //   .then(toEntityMap)
 
   let users: Map<string, User> = new Map()
   let portVaults: Map<string, PortVault> = new Map()
@@ -90,8 +96,10 @@ export async function parseContext(
   let naraSupplyChartPoints: Map<string, NaraSupplyChartPoint> = new Map()
   let naraTvlChartPoints: Map<string, NaraTvlChartPoint> = new Map()
   let naraApyChartPoints: Map<string, NaraApyChartPoint> = new Map()
-
-  await initializeTokens(ctx)
+  let naraRedemptions: Map<string, NaraRedemption> = new Map()
+  let naraRedemptionActivities: Map<string, NaraRedemptionActivity> = new Map()
+  let totalRequestedAmounts: Map<string, TotalRequestedAmount> = new Map()
+  const naraUsdAddress = getTrackedTokenAddress(ctx.syncedNetwork, 'NaraUSD')
 
     // Initialize port
     ; ({ portVaults, expectedExchangeRates } = await portService.initializePort({
@@ -460,6 +468,24 @@ export async function parseContext(
           ))
         }
       }
+
+      if (naraUsdAddress && log.address === naraUsdAddress.toLowerCase()) {
+        switch (log.topics[0]) {
+          case NaraUSD.events.Redeem.topic:
+          case NaraUSD.events.RedemptionRequested.topic:
+          case NaraUSD.events.RedemptionCompleted.topic: {
+            ; ({ users, naraRedemptions, naraRedemptionActivities, totalRequestedAmounts } = await parserService.parseNaraRedemptionActivity(
+              ctx,
+              log,
+              users,
+              naraRedemptions,
+              naraRedemptionActivities,
+              totalRequestedAmounts,
+            ))
+            break
+          }
+        }
+      }
     }
 
     ; ({ portVaults, expectedExchangeRates, snapshots } = await eerService.updateExpectedExchangeRateForVaults(
@@ -508,7 +534,7 @@ export async function parseContext(
 
   naraGlobalStats = await naraService.updateGlobalStats(ctx, config, naraGlobalStats, portVaults, portNavUpdates)
 
-  await ctx.store.upsert([...currencies.values()])
+  // await ctx.store.upsert([...currencies.values()])
   await ctx.store.upsert([...users.values()])
   await ctx.store.upsert([...portVaults.values()])
   
@@ -535,6 +561,9 @@ export async function parseContext(
   await ctx.store.upsert([...naraSupplyChartPoints.values()])
   await ctx.store.upsert([...naraTvlChartPoints.values()])
   await ctx.store.upsert([...naraApyChartPoints.values()])
+  await ctx.store.upsert([...naraRedemptions.values()])
+  await ctx.store.upsert([...naraRedemptionActivities.values()])
+  await ctx.store.upsert([...totalRequestedAmounts.values()])
 
   await ctx.store.upsert(portGlobalStats)
   await ctx.store.upsert(naraGlobalStats)

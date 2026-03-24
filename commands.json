@@ -54,12 +54,12 @@
     "process:arbitrum": {
       "description": "Load .env and start the squid processor",
       "deps": ["build", "migration:apply"],
-      "cmd": ["node", "--require=dotenv/config", "lib/arbitrum/logs.js"]
+      "cmd": ["env", "SQD_EVM_RPC_SPLIT_SIZE=500", "node", "--require=dotenv/config", "lib/arbitrum/logs.js"]
     },
     "process:arbitrumSepolia": {
       "description": "Load .env and start the squid processor",
       "deps": ["build", "migration:apply"],
-      "cmd": ["node", "--require=dotenv/config", "lib/arbitrumSepolia/logs.js"]
+      "cmd": ["env", "SQD_EVM_RPC_SPLIT_SIZE=500", "node", "--require=dotenv/config", "lib/arbitrumSepolia/logs.js"]
     },
     "serve": {
       "description": "Start the GraphQL API server",

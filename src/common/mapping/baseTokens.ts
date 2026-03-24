@@ -148,3 +148,9 @@ export async function initializeTokens(ctx: ProcessorContext) {
     await ctx.store.upsert([...tokens]);
     hasInitialized[network as keyof typeof hasInitialized] = true;
 } 
+
+export function getTrackedTokenAddress(network: Network, symbol: string): string | undefined {
+    return TRACKED_TOKENS.find(
+        (token) => token.network === network && token.symbol === symbol
+    )?.address.toLowerCase();
+}

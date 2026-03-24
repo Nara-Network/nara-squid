@@ -2,9 +2,9 @@
 import { ProcessorContext, Log } from '../common/processor';
 
 import { Config } from '../common/types';
-import { calculateUsdPriceInBN, convertToBaseTokenAmount, isTestnet, readContract, normalizeDecimals, clampToZero, getTokenDecimalsCached } from '../helpers/common';
+import { convertToBaseTokenAmount, isTestnet, readContract, normalizeDecimals, clampToZero, getTokenDecimalsCached } from '../helpers/common';
 import { getEERConfigForVault, isEERDebugEnabled } from '../helpers/eer';
-import { PortVault, User, PortDeposit, PortWithdrawalRequest, PortWithdrawalRequestStatus, PortVaultStatus, PortVaultStatusUpdate, PortNavUpdate, PortGlobalStats, PortRequestFulfilled, PortVaultActivity, PortVaultAction, PortVaultTransactionHistory, PortVaultTxAction, PortVaultAPY, PortVaultType, FundsDiverted, FundsReverted, StrategyKind, StrategyYieldSnapshot, StrategyYieldState, ManagerWithdraw, ManagerDeposit, PortVaultApyChart } from '../model';
+import { PortVault, User, PortDeposit, PortWithdrawalRequest, PortWithdrawalRequestStatus, PortVaultStatus, PortVaultStatusUpdate, PortNavUpdate, PortGlobalStats, PortRequestFulfilled, PortVaultActivity, PortVaultAction, PortVaultTransactionHistory, PortVaultTxAction, PortVaultAPY, PortVaultType, FundsDiverted, FundsReverted, StrategyKind, StrategyYieldSnapshot, StrategyYieldState, ManagerWithdraw, ManagerDeposit, PortVaultApyChart, NaraRedemption, NaraRedemptionActivity, NaraRedemptionAction, NaraRedemptionStatus, TotalRequestedAmount } from '../model';
 import * as BoringVaultAbi from '../abi/BoringVault';
 import * as AccountantAbi from '../abi/AccountantWithRateProviders';
 import * as AtomicQueueAbi from '../abi/AtomicQueue';
@@ -12,8 +12,8 @@ import * as TellerAbi from '../abi/TellerWithMultiAssetSupport';
 import * as AaveV3PoolAbi from '../abi/AaveV3Pool';
 import * as CompoundUSDCAbi from '../abi/CompoundUSDC';
 import * as ERC20Abi from '../abi/ERC20';
+import * as NaraUSD from '../abi/NaraUSD';
 import { userService } from './user';
-import { BigDecimal } from '@subsquid/big-decimal';
 import { tokensService } from './tokens';
 import { In, Not } from 'typeorm';
 import { SKIP_ACTIVITY_TX_HASHES } from '../constants';
@@ -21,6 +21,257 @@ import { throwError } from '../common/utils/error';
 import { portService } from './port';
 import { toSec } from '../common/utils/time';
 import { eerService } from './eer';
+
+function createEmptyUser(userId: string, address: string, network: ProcessorContext['syncedNetwork']): User {
+  return new User({
+    id: userId,
+    address: address.toLowerCase(),
+    isTestnet: isTestnet(network),
+    portWithdrawalRequests: [],
+    portDeposits: [],
+    naraRedemptions: [],
+  });
+}
+
+async function getPendingNaraRedemption(
+  ctx: ProcessorContext,
+  userId: string,
+  naraRedemptions: Map<string, NaraRedemption>,
+): Promise<NaraRedemption | undefined> {
+  const inMemoryPending = Array.from(naraRedemptions.values()).find(
+    (redemption) => redemption.user.id === userId && redemption.status === NaraRedemptionStatus.REQUESTED
+  );
+
+  if (inMemoryPending) {
+    return inMemoryPending;
+  }
+
+  return ctx.store.findOne(NaraRedemption, {
+    where: {
+      id: Not(In(Array.from(naraRedemptions.keys()))),
+      user: { id: userId },
+      status: NaraRedemptionStatus.REQUESTED,
+    },
+    relations: { user: true },
+  });
+}
+
+function getTotalRequestedAmountId(collateralAddress: string): string {
+  return collateralAddress.toLowerCase();
+}
+
+async function getTotalRequestedAmount(
+  ctx: ProcessorContext,
+  collateralAddress: string,
+  totalRequestedAmounts: Map<string, TotalRequestedAmount>,
+): Promise<TotalRequestedAmount> {
+  const normalizedCollateralAddress = collateralAddress.toLowerCase();
+  const totalRequestedAmountId = getTotalRequestedAmountId(normalizedCollateralAddress);
+  const inMemory = totalRequestedAmounts.get(totalRequestedAmountId);
+
+  if (inMemory) {
+    return inMemory;
+  }
+
+  const persisted = await ctx.store.findOne(TotalRequestedAmount, {
+    where: { id: totalRequestedAmountId },
+  });
+
+  if (persisted) {
+    totalRequestedAmounts.set(persisted.id, persisted);
+    return persisted;
+  }
+
+  const totalRequestedAmount = new TotalRequestedAmount({
+    id: totalRequestedAmountId,
+    collateralAddress: normalizedCollateralAddress,
+    amount: 0n,
+  });
+
+  totalRequestedAmounts.set(totalRequestedAmount.id, totalRequestedAmount);
+  return totalRequestedAmount;
+}
+
+async function applyTotalRequestedAmountDelta(
+  ctx: ProcessorContext,
+  totalRequestedAmounts: Map<string, TotalRequestedAmount>,
+  collateralAddress: string,
+  delta: bigint,
+): Promise<Map<string, TotalRequestedAmount>> {
+  if (delta === 0n) {
+    return totalRequestedAmounts;
+  }
+
+  const totalRequestedAmount = await getTotalRequestedAmount(ctx, collateralAddress, totalRequestedAmounts);
+  const nextAmount = totalRequestedAmount.amount + delta;
+
+  if (nextAmount < 0n) {
+    ctx.log.warn(
+      `[NARA] TotalRequestedAmount underflow prevented for collateral=${collateralAddress.toLowerCase()} current=${totalRequestedAmount.amount.toString()} delta=${delta.toString()}`
+    );
+  }
+
+  totalRequestedAmount.amount = clampToZero(nextAmount);
+  totalRequestedAmounts.set(totalRequestedAmount.id, totalRequestedAmount);
+
+  return totalRequestedAmounts;
+}
+
+async function parseNaraRedemptionActivity(
+  ctx: ProcessorContext,
+  log: Log,
+  users: Map<string, User>,
+  naraRedemptions: Map<string, NaraRedemption>,
+  naraRedemptionActivities: Map<string, NaraRedemptionActivity>,
+  totalRequestedAmounts: Map<string, TotalRequestedAmount>,
+): Promise<{
+  users: Map<string, User>,
+  naraRedemptions: Map<string, NaraRedemption>,
+  naraRedemptionActivities: Map<string, NaraRedemptionActivity>,
+  totalRequestedAmounts: Map<string, TotalRequestedAmount>,
+}> {
+  let action: NaraRedemptionAction;
+  let userAddress: string;
+  let collateralAssetAddress: string;
+  let naraUsdAmount: bigint;
+  let collateralAmount: bigint | undefined;
+  const timestamp = BigInt(log.block.timestamp);
+
+  switch (log.topics[0]) {
+    case NaraUSD.events.Redeem.topic: {
+      const { beneficiary, collateralAsset, naraUsdAmount: redeemAmount, collateralAmount: redeemedCollateral } =
+        NaraUSD.events.Redeem.decode(log);
+      action = NaraRedemptionAction.INSTANT_REDEEM;
+      userAddress = beneficiary.toLowerCase();
+      collateralAssetAddress = collateralAsset.toLowerCase();
+      naraUsdAmount = redeemAmount;
+      collateralAmount = redeemedCollateral;
+      break;
+    }
+    case NaraUSD.events.RedemptionRequested.topic: {
+      const { user, naraUsdAmount: requestedAmount, collateralAsset } =
+        NaraUSD.events.RedemptionRequested.decode(log);
+      action = NaraRedemptionAction.REQUESTED;
+      userAddress = user.toLowerCase();
+      collateralAssetAddress = collateralAsset.toLowerCase();
+      naraUsdAmount = requestedAmount;
+      collateralAmount = undefined;
+      break;
+    }
+    case NaraUSD.events.RedemptionCompleted.topic: {
+      const { user, naraUsdAmount: completedAmount, collateralAsset, collateralAmount: completedCollateral } =
+        NaraUSD.events.RedemptionCompleted.decode(log);
+      action = NaraRedemptionAction.COMPLETED;
+      userAddress = user.toLowerCase();
+      collateralAssetAddress = collateralAsset.toLowerCase();
+      naraUsdAmount = completedAmount;
+      collateralAmount = completedCollateral;
+      break;
+    }
+    default:
+      return { users, naraRedemptions, naraRedemptionActivities, totalRequestedAmounts };
+  }
+  const userId = userService.getUserId(userAddress, ctx.syncedNetwork);
+  let user = users.get(userId) ?? await userService.getUserById(ctx, userId);
+
+  if (!user) {
+    user = createEmptyUser(userId, userAddress, ctx.syncedNetwork);
+    users.set(userId, user);
+  }
+
+  let redemption: NaraRedemption;
+  if (action === NaraRedemptionAction.INSTANT_REDEEM) {
+    redemption = new NaraRedemption({
+      id: `${log.transactionHash}-${log.logIndex}`,
+      user,
+      status: NaraRedemptionStatus.COMPLETED,
+      naraUsdAmount,
+      collateralAmount,
+      collateralAssetAddress,
+      requestedAt: timestamp,
+      completedAt: timestamp,
+      updatedAt: timestamp,
+      activities: [],
+    });
+  } else if (action === NaraRedemptionAction.REQUESTED) {
+    const existingPendingRedemption = await getPendingNaraRedemption(ctx, userId, naraRedemptions);
+
+    if (existingPendingRedemption) {
+      totalRequestedAmounts = await applyTotalRequestedAmountDelta(
+        ctx,
+        totalRequestedAmounts,
+        existingPendingRedemption.collateralAssetAddress,
+        -existingPendingRedemption.naraUsdAmount,
+      );
+
+      existingPendingRedemption.status = NaraRedemptionStatus.REQUESTED;
+      existingPendingRedemption.naraUsdAmount = naraUsdAmount;
+      existingPendingRedemption.collateralAssetAddress = collateralAssetAddress;
+      existingPendingRedemption.collateralAmount = undefined;
+      existingPendingRedemption.updatedAt = timestamp;
+      redemption = existingPendingRedemption;
+    } else {
+      redemption = new NaraRedemption({
+        id: `${userId}-${log.transactionHash}-${log.logIndex}`,
+        user,
+        status: NaraRedemptionStatus.REQUESTED,
+        naraUsdAmount,
+        collateralAmount: undefined,
+        collateralAssetAddress,
+        requestedAt: timestamp,
+        completedAt: undefined,
+        updatedAt: timestamp,
+        activities: [],
+      });
+    }
+
+    totalRequestedAmounts = await applyTotalRequestedAmountDelta(
+      ctx,
+      totalRequestedAmounts,
+      collateralAssetAddress,
+      naraUsdAmount,
+    );
+  } else {
+    const existingPendingRedemption = await getPendingNaraRedemption(ctx, userId, naraRedemptions);
+
+    if (!existingPendingRedemption) {
+      throwError(`Pending Nara redemption not found - parseNaraRedemptionActivity failed.`, log.transactionHash);
+    }
+
+    totalRequestedAmounts = await applyTotalRequestedAmountDelta(
+      ctx,
+      totalRequestedAmounts,
+      existingPendingRedemption.collateralAssetAddress,
+      -existingPendingRedemption.naraUsdAmount,
+    );
+
+    existingPendingRedemption.status = NaraRedemptionStatus.COMPLETED;
+    existingPendingRedemption.naraUsdAmount = naraUsdAmount;
+    existingPendingRedemption.collateralAssetAddress = collateralAssetAddress;
+    existingPendingRedemption.collateralAmount = collateralAmount;
+    existingPendingRedemption.completedAt = timestamp;
+    existingPendingRedemption.updatedAt = timestamp;
+    redemption = existingPendingRedemption;
+  }
+
+  naraRedemptions.set(redemption.id, redemption);
+
+  const activity = new NaraRedemptionActivity({
+    id: `${log.transactionHash}-${log.logIndex}`,
+    redemption,
+    action,
+    naraUsdAmount,
+    collateralAmount,
+    collateralAssetAddress,
+    timestamp,
+    txHash: log.transactionHash,
+    block: BigInt(log.block.height),
+  });
+
+  naraRedemptionActivities.set(activity.id, activity);
+
+  return { users, naraRedemptions, naraRedemptionActivities, totalRequestedAmounts };
+}
 
 async function parseVaultEnter(ctx: ProcessorContext, log: Log, config: Config, portDeposits: Map<string, PortDeposit>, users: Map<string, User>, portVaults: Map<string, PortVault>, portGlobalStats: PortGlobalStats, portVaultTransactionHistories: Map<string, PortVaultTransactionHistory>): Promise<{ portDeposits: Map<string, PortDeposit>, users: Map<string, User>, portVaults: Map<string, PortVault>, portGlobalStats: PortGlobalStats, portVaultTransactionHistories: Map<string, PortVaultTransactionHistory> }> {
   const { from, asset, amount, shares } = BoringVaultAbi.events.Enter.decode(log);
@@ -54,24 +305,7 @@ async function parseVaultEnter(ctx: ProcessorContext, log: Log, config: Config, 
   let user = users.get(userId) ?? await userService.getUserById(ctx, userId);
 
   if (!user) {
-    user = new User({
-      id: userId,
-      referredBy: undefined,
-      referralCode: undefined,
-      referredUsers: [],
-      referredUsersPoints: [],
-      referralCodePoints: BigDecimal(0),
-      totalPoints: BigDecimal(0),
-      referralPoints: BigDecimal(0),
-      lgePoints: BigDecimal(0),
-      tvl: BigDecimal(0),
-      leaderboardPosition: 0,
-      address: from.toLowerCase(),
-      totalBridgeTransfers: BigInt(0),
-      isTestnet: isTestnet(ctx.syncedNetwork),
-      portWithdrawalRequests: [],
-      portDeposits: [],
-    });
+    user = createEmptyUser(userId, from, ctx.syncedNetwork);
     users.set(userId, user);
   }
   const portDeposit = new PortDeposit({
@@ -140,24 +374,7 @@ async function parseAtomicRequestUpdated(ctx: ProcessorContext, log: Log, portWi
   let user = users.get(userId) ?? await userService.getUserById(ctx, userId);
 
   if (!user) {
-    user = new User({
-      id: userId,
-      referredBy: undefined,
-      referralCode: undefined,
-      referredUsers: [],
-      referredUsersPoints: [],
-      referralCodePoints: BigDecimal(0),
-      totalPoints: BigDecimal(0),
-      referralPoints: BigDecimal(0),
-      lgePoints: BigDecimal(0),
-      tvl: BigDecimal(0),
-      leaderboardPosition: 0,
-      address: from.toLowerCase(),
-      totalBridgeTransfers: BigInt(0),
-      isTestnet: isTestnet(ctx.syncedNetwork),
-      portWithdrawalRequests: [],
-      portDeposits: [],
-    });
+    user = createEmptyUser(userId, from, ctx.syncedNetwork);
     users.set(userId, user);
   }
 
@@ -1378,6 +1595,7 @@ async function parseBorrowerTransfer(
 export const parserService = {
   parseVaultEnter,
   parseAtomicRequestUpdated,
+  parseNaraRedemptionActivity,
   parseVaultStatusUpdate,
   parseNavUpdate,
   parseAssetAdded,
