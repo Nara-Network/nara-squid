@@ -464,12 +464,12 @@ function formatRawAmount(amount: bigint, decimals: number): BigDecimal {
   return BigDecimal(amount.toString()).div(BigDecimal((10n ** BigInt(decimals)).toString()));
 }
 
-async function getInvestmentValueFormatted(
+async function getInvestmentPosition(
   ctx: ProcessorContext,
   wallet: string,
   portVault: PortVault,
   blockHeight: number
-): Promise<BigDecimal> {
+): Promise<{ currentNav: bigint; valueBaseRaw: bigint }> {
   const shareBalance = BigInt(
     await readContract(
       ctx,
@@ -482,13 +482,30 @@ async function getInvestmentValueFormatted(
   );
 
   if (shareBalance === 0n) {
-    return BigDecimal(0);
+    return {
+      currentNav: 0n,
+      valueBaseRaw: 0n,
+    };
   }
 
   const currentNav = BigInt(
     await readContract(ctx, portVault.accountant, AccountantAbi, 'getRate', [], blockHeight)
   );
   const valueBaseRaw = (shareBalance * convertToBaseTokenAmount(currentNav, BigInt(portVault.baseToken.decimals), BigInt(18))) / BigInt(10 ** portVault.decimals);
+
+  return {
+    currentNav,
+    valueBaseRaw,
+  };
+}
+
+async function getInvestmentValueFormatted(
+  ctx: ProcessorContext,
+  wallet: string,
+  portVault: PortVault,
+  blockHeight: number
+): Promise<BigDecimal> {
+  const { valueBaseRaw } = await getInvestmentPosition(ctx, wallet, portVault, blockHeight);
 
   return formatRawAmount(valueBaseRaw, Number(portVault.baseToken.decimals));
 }
@@ -549,8 +566,15 @@ async function getWeightedApy7d(
   config: Config,
   portVaults: Map<string, PortVault>,
   portNavUpdates: Map<string, PortNavUpdate>,
-  currentTimestamp: number
+  currentTimestamp: number,
+  blockHeight: number
 ): Promise<bigint> {
+  const wallet = config.Nara?.Investments;
+
+  if (!wallet) {
+    return 0n;
+  }
+
   let weightedApy = 0n;
   let totalWeight = 0n;
 
@@ -560,7 +584,13 @@ async function getWeightedApy7d(
     }
 
     const startApyCalculationTimestamp = config.Port?.Vaults?.find((vault) => vault.address.toLowerCase() == portVault.address.toLowerCase())?.StartApyCalculationTimestamp;
-    const tvlWeight = normalizeDecimals(portVault.tvl, Number(portVault.baseToken.decimals), 18);
+    const { currentNav, valueBaseRaw } = await getInvestmentPosition(
+      ctx,
+      wallet,
+      portVault,
+      blockHeight
+    );
+    const tvlWeight = normalizeDecimals(valueBaseRaw, Number(portVault.baseToken.decimals), 18);
 
     if (tvlWeight <= 0n) {
       continue;
@@ -569,7 +599,7 @@ async function getWeightedApy7d(
     const { apr } = await portService.calculateRollingAPR(
       ctx,
       portVault.address,
-      portVault.currentNav,
+      currentNav,
       currentTimestamp,
       7,
       portVault.startedAt,
@@ -647,7 +677,14 @@ async function updateGlobalStats(
   naraGlobalStats.apy7d = apy7d.apr ?? 0n;
   naraGlobalStats.apy14d = apy14d.apr ?? 0n;
   naraGlobalStats.apy30d = apy30d.apr ?? 0n;
-  naraGlobalStats.weightedApy7d = naraGlobalStats.apy7d;
+  naraGlobalStats.weightedApy7d = await getWeightedApy7d(
+    ctx,
+    config,
+    portVaults,
+    portNavUpdates,
+    block.header.timestamp,
+    block.header.height
+  );
   naraGlobalStats.weightedTenorDays = null;
   naraGlobalStats.updatedAt = metrics.updatedAt;
 
