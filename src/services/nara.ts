@@ -1,9 +1,10 @@
 import * as ERC20Abi from '../abi/ERC20';
 import * as NaraUSDPlusAbi from '../abi/NaraUSDPlus';
+import * as AccountantAbi from '../abi/AccountantWithRateProviders';
 import { BigDecimal } from '@subsquid/big-decimal';
 import { ProcessorContext } from '../common/processor';
-import { Config, NaraInvestmentVaultSource, NaraReserveFundSource } from '../common/types';
-import { calculateUsdPriceInBN, convertToBaseTokenAmount, normalizeDecimals, readContract } from '../helpers/common';
+import { Config } from '../common/types';
+import { convertToBaseTokenAmount, normalizeDecimals, readContract } from '../helpers/common';
 import { NaraApyChartPoint, NaraGlobalStats, Network, PortNavUpdate, PortVault, PortVaultType, Token } from '../model';
 import { portService } from './port';
 import { Between, MoreThanOrEqual } from 'typeorm';
@@ -14,6 +15,22 @@ export const START_APY_CALC_DATE = Date.UTC(2026, 2, 19, 0, 0, 0, 0);
 const EXCHANGE_RATE_DECIMALS = 18n;
 const MIN_HOURS_FOR_APR = 1;
 const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+const ANKR_MULTI_CHAIN_URL = 'https://rpc.ankr.com/multichain';
+
+type AnkrTokenBalance = {
+  contractAddress?: string;
+  balanceUsd?: string;
+};
+
+type AnkrAccountBalanceResponse = {
+  result?: {
+    totalBalanceUsd?: string;
+    assets?: AnkrTokenBalance[];
+  };
+};
+
+const LAST_WALLET_BALANCE_REFRESH_AT = new Map<string, number>();
 
 function getDayEndTimestamp(timestampMs: number): number {
   const date = new Date(timestampMs);
@@ -23,6 +40,95 @@ function getDayEndTimestamp(timestampMs: number): number {
 
 function getFirstEligibleApyTimestamp(days: number): number {
   return getDayEndTimestamp(START_APY_CALC_DATE + ((days - 1) * DAY_MS));
+}
+
+function getAnkrBlockchain(network: Network): string[] | null {
+  switch (network) {
+    case Network.ARBITRUM:
+      return ['arbitrum'];
+    default:
+      return null;
+  }
+}
+
+function getAnkrApiUrl(): string | null {
+  const configuredUrl = process.env.ANKR_API_URL || process.env.NEXT_PUBLIC_ANKR_API_URL;
+  if (configuredUrl) {
+    return configuredUrl;
+  }
+
+  const apiKey = process.env.ANKR_API_KEY_ARBITRUM || process.env.ARBITRUM_API_KEY || process.env.ANKR_API_KEY;
+  if (!apiKey) {
+    return null;
+  }
+
+  return `${ANKR_MULTI_CHAIN_URL}/${apiKey}`;
+}
+
+function getWalletRefreshIntervalMs(isSynced: boolean): number {
+  return isSynced ? HOUR_MS : DAY_MS;
+}
+
+function getWalletRefreshCacheKey(ctx: ProcessorContext): string {
+  return `${ctx.syncedNetwork}`;
+}
+
+function shouldRefreshWalletMetrics(ctx: ProcessorContext): boolean {
+  const isSynced = ctx.isHead && ctx.blocks.length === 1;
+  const intervalMs = getWalletRefreshIntervalMs(isSynced);
+  const nowTs = ctx.blocks[ctx.blocks.length - 1].header.timestamp;
+  const cacheKey = getWalletRefreshCacheKey(ctx);
+  const lastRefreshAt = LAST_WALLET_BALANCE_REFRESH_AT.get(cacheKey) ?? 0;
+
+  if (lastRefreshAt === 0) {
+    return true;
+  }
+
+  return nowTs - lastRefreshAt >= intervalMs;
+}
+
+async function getAccountBalanceUsd(
+  walletAddress: string,
+  network: Network
+): Promise<BigDecimal | null> {
+  const apiUrl = getAnkrApiUrl();
+  if (!apiUrl) {
+    return null;
+  }
+
+  const blockchain = getAnkrBlockchain(network);
+  if (!blockchain) {
+    return null;
+  }
+
+  const response = await fetch(apiUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'ankr_getAccountBalance',
+      params: {
+        walletAddress,
+        blockchain,
+      },
+      id: 1,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Ankr API error: ${response.status} ${response.statusText}`);
+  }
+
+  const data = (await response.json()) as AnkrAccountBalanceResponse;
+  const totalBalanceUsd = data.result?.totalBalanceUsd;
+
+  if (!totalBalanceUsd) {
+    return BigDecimal(0);
+  }
+
+  return BigDecimal(totalBalanceUsd);
 }
 
 async function getGlobalStats(ctx: ProcessorContext): Promise<NaraGlobalStats> {
@@ -288,43 +394,20 @@ async function calculateActualAPR(
 
 async function getReserveFundFormatted(
   ctx: ProcessorContext,
-  reserveFundSources: NaraReserveFundSource[],
-  blockHeight?: number
+  walletAddress?: string | null
 ): Promise<BigDecimal | null> {
-  if (reserveFundSources.length === 0) {
+  if (!walletAddress) {
+    return BigDecimal(0);
+  }
+
+  try {
+    return await getAccountBalanceUsd(walletAddress, ctx.syncedNetwork);
+  } catch (error) {
+    ctx.log.warn(
+      `[NARA] Failed to fetch reserve fund balance for wallet=${walletAddress} network=${ctx.syncedNetwork}: ${String(error)}`
+    );
     return null;
   }
-
-  let totalReserveFund = BigDecimal(0);
-
-  for (const source of reserveFundSources) {
-    const token = await getTokenBySymbol(ctx, source.tokenSymbol);
-    if (!token) {
-      ctx.log.warn(
-        `[NARA] Reserve fund token ${source.tokenSymbol} not found for network=${ctx.syncedNetwork}`
-      );
-      return null;
-    }
-
-    const rawBalance = BigInt(
-      await readContract(
-        ctx,
-        token.address,
-        ERC20Abi,
-        'balanceOf',
-        { account: source.wallet },
-        blockHeight ?? ctx.blocks[ctx.blocks.length - 1].header.height
-      )
-    );
-
-    const formattedBalance = BigDecimal(rawBalance.toString()).div(
-      BigDecimal((10n ** BigInt(token.decimals)).toString())
-    );
-
-    totalReserveFund = totalReserveFund.add(formattedBalance);
-  }
-
-  return totalReserveFund;
 }
 
 async function getMetricsAtBlock(
@@ -360,30 +443,19 @@ async function getMetricsAtBlock(
     decimals: naraUsdDecimals,
   } = await getFormattedSupply(ctx, naraUsdToken, blockHeight);
   const { formattedSupply: naraUsdPlusSupplyFormatted } = await getFormattedSupply(ctx, naraUsdPlusToken, blockHeight);
-  const reserveFundSources = config.Nara?.ReserveFund ?? [];
-  const reserveFundFormatted = await getReserveFundFormatted(ctx, reserveFundSources, blockHeight);
 
   const percentageStaked = naraUsdSupply > 0n
     ? naraUsdPlusSupplyFormatted.mul(BigDecimal(100)).div(naraUsdSupplyFormatted)
     : BigDecimal(0);
-  const protocolBackingRatio = reserveFundFormatted !== null && naraUsdSupply > 0n
-    ? naraUsdSupplyFormatted.add(reserveFundFormatted).div(naraUsdSupplyFormatted)
-    : BigDecimal(0);
-
-  if (reserveFundFormatted === null) {
-    ctx.log.warn(
-      `[NARA] Reserve fund is not configured for network=${ctx.syncedNetwork}; protocol backing ratio will remain 0`
-    );
-  }
 
   return {
     naraUsdSupply,
     naraUsdSupplyFormatted,
     naraUsdDecimals,
-    reserveFundFormatted: reserveFundFormatted ?? BigDecimal(0),
-    protocolBackingRatio,
+    reserveFundFormatted: BigDecimal(0),
+    protocolBackingRatio: BigDecimal(0),
     percentageStaked,
-    cashAndEquivalentsFormatted: naraUsdSupplyFormatted.add(reserveFundFormatted ?? BigDecimal(0)),
+    cashAndEquivalentsFormatted: BigDecimal(0),
     updatedAt: BigInt(blockTimestamp),
   };
 }
@@ -395,23 +467,13 @@ function formatRawAmount(amount: bigint, decimals: number): BigDecimal {
 async function getInvestmentValueFormatted(
   ctx: ProcessorContext,
   wallet: string,
-  holding: NaraInvestmentVaultSource,
-  blockHeight: number,
-  portVaults: Map<string, PortVault>
+  portVault: PortVault,
+  blockHeight: number
 ): Promise<BigDecimal> {
-  const vaultAddress = holding.vaultAddress.toLowerCase();
-  const portVault = portVaults.get(vaultAddress) ?? await portService.getPortVaultByAddress(ctx, vaultAddress);
-
-  if (!portVault) {
-    ctx.log.warn(`[NARA] Investment vault ${holding.vaultAddress} not found`);
-    return BigDecimal(0);
-  }
-
-  const tokenAddress = (holding.tokenAddress ?? holding.vaultAddress).toLowerCase();
   const shareBalance = BigInt(
     await readContract(
       ctx,
-      tokenAddress,
+      portVault.address,
       ERC20Abi,
       'balanceOf',
       { account: wallet },
@@ -423,22 +485,12 @@ async function getInvestmentValueFormatted(
     return BigDecimal(0);
   }
 
-  const shareDecimals = tokenAddress === portVault.address
-    ? portVault.decimals
-    : Number(await readContract(ctx, tokenAddress, ERC20Abi, 'decimals', [], blockHeight));
+  const currentNav = BigInt(
+    await readContract(ctx, portVault.accountant, AccountantAbi, 'getRate', [], blockHeight)
+  );
+  const valueBaseRaw = (shareBalance * convertToBaseTokenAmount(currentNav, BigInt(portVault.baseToken.decimals), BigInt(18))) / BigInt(10 ** portVault.decimals);
 
-  const valueBaseRaw = (shareBalance * convertToBaseTokenAmount(portVault.currentNav, BigInt(portVault.baseToken.decimals), BigInt(18))) / BigInt(10 ** shareDecimals);
-  const baseToken = await getTokenBySymbol(ctx, portVault.baseToken.symbol);
-
-  if (!baseToken) {
-    ctx.log.warn(`[NARA] Base token ${portVault.baseToken.symbol} not found for vault ${portVault.address}`);
-    return BigDecimal(0);
-  }
-
-  const priceInBN = calculateUsdPriceInBN(BigInt(10 ** Number(baseToken.decimals)), baseToken.price, BigInt(baseToken.decimals));
-  const valueUsdRaw = (valueBaseRaw * priceInBN) / BigInt(10 ** Number(baseToken.decimals));
-
-  return formatRawAmount(valueUsdRaw, Number(baseToken.decimals));
+  return formatRawAmount(valueBaseRaw, Number(portVault.baseToken.decimals));
 }
 
 async function getInvestmentAssetsFormatted(
@@ -447,22 +499,49 @@ async function getInvestmentAssetsFormatted(
   portVaults: Map<string, PortVault>,
   blockHeight: number
 ): Promise<BigDecimal> {
-  const wallet = config.Nara?.InvestmentWallet;
-  const investmentVaults = config.Nara?.InvestmentVaults ?? [];
+  const wallet = config.Nara?.Investments;
 
-  if (!wallet || investmentVaults.length === 0) {
+  if (!wallet) {
     return BigDecimal(0);
   }
 
   let totalInvestments = BigDecimal(0);
 
-  for (const holding of investmentVaults) {
+  for (const holding of portVaults.values()) {
     totalInvestments = totalInvestments.add(
-      await getInvestmentValueFormatted(ctx, wallet, holding, blockHeight, portVaults)
+      await getInvestmentValueFormatted(ctx, wallet, holding, blockHeight)
     );
   }
 
   return totalInvestments;
+}
+
+async function refreshWalletBackedMetrics(
+  ctx: ProcessorContext,
+  config: Config,
+  naraGlobalStats: NaraGlobalStats,
+  portVaults: Map<string, PortVault>,
+  blockHeight: number
+): Promise<NaraGlobalStats> {
+  const reserveFundWallet = config.Nara?.ReserveFund;
+  const investmentsWallet = config.Nara?.Investments;
+
+  const [reserveFundFormatted, investmentAssetsFormatted] = await Promise.all([
+    getReserveFundFormatted(ctx, reserveFundWallet),
+    investmentsWallet ? getInvestmentAssetsFormatted(ctx, config, portVaults, blockHeight) : Promise.resolve(BigDecimal(0)),
+  ]);
+
+  if (reserveFundFormatted !== null) {
+    naraGlobalStats.reserveFundFormatted = reserveFundFormatted;
+  }
+
+  naraGlobalStats.investmentAssetsFormatted = investmentAssetsFormatted;
+  LAST_WALLET_BALANCE_REFRESH_AT.set(
+    getWalletRefreshCacheKey(ctx),
+    ctx.blocks[ctx.blocks.length - 1].header.timestamp
+  );
+
+  return naraGlobalStats;
 }
 
 async function getWeightedApy7d(
@@ -517,12 +596,23 @@ async function updateGlobalStats(
   portNavUpdates: Map<string, PortNavUpdate>
 ): Promise<NaraGlobalStats> {
   const isSynced = ctx.isHead && ctx.blocks.length === 1;
+  const shouldRefreshWallets = shouldRefreshWalletMetrics(ctx);
 
-  if (!isSynced) {
+  if (!isSynced && !shouldRefreshWallets) {
     return naraGlobalStats;
   }
 
   const block = ctx.blocks[ctx.blocks.length - 1];
+  if (shouldRefreshWallets) {
+    naraGlobalStats = await refreshWalletBackedMetrics(
+      ctx,
+      config,
+      naraGlobalStats,
+      portVaults,
+      block.header.height
+    );
+  }
+
   const metrics = await getMetricsAtBlock(ctx, config, block.header.height, block.header.timestamp);
   if (!metrics) return naraGlobalStats;
 
@@ -530,12 +620,18 @@ async function updateGlobalStats(
   naraGlobalStats.naraUsdSupply = metrics.naraUsdSupply;
   naraGlobalStats.naraUsdSupplyFormatted = metrics.naraUsdSupplyFormatted;
   naraGlobalStats.naraUsdDecimals = metrics.naraUsdDecimals;
-  naraGlobalStats.reserveFundFormatted = metrics.reserveFundFormatted;
-  naraGlobalStats.protocolBackingRatio = metrics.protocolBackingRatio;
   naraGlobalStats.percentageStaked = metrics.percentageStaked;
-  naraGlobalStats.investmentAssetsFormatted = await getInvestmentAssetsFormatted(ctx, config, portVaults, block.header.height);
-  naraGlobalStats.cashAndEquivalentsFormatted = metrics.cashAndEquivalentsFormatted;
+  naraGlobalStats.protocolBackingRatio = metrics.naraUsdSupply > 0n
+    ? metrics.naraUsdSupplyFormatted.add(naraGlobalStats.reserveFundFormatted).div(metrics.naraUsdSupplyFormatted)
+    : BigDecimal(0);
+  naraGlobalStats.cashAndEquivalentsFormatted = metrics.naraUsdSupplyFormatted.add(naraGlobalStats.reserveFundFormatted);
   naraGlobalStats.totalAssetsFormatted = naraGlobalStats.cashAndEquivalentsFormatted.add(naraGlobalStats.investmentAssetsFormatted);
+
+  if (!isSynced) {
+    naraGlobalStats.updatedAt = metrics.updatedAt;
+    return naraGlobalStats;
+  }
+
   const currentExchangeRate = await getNaraUsdPlusExchangeRateAtBlock(ctx, block.header.height);
   const [apy7d, apy14d, apy30d] = currentExchangeRate == null
     ? [

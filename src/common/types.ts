@@ -36,9 +36,8 @@ export type NaraInvestmentVaultSource = {
 export type Config = {
   startBlock: number;
   Nara?: {
-    ReserveFund?: NaraReserveFundSource[];
-    InvestmentWallet?: string;
-    InvestmentVaults?: NaraInvestmentVaultSource[];
+    ReserveFund?: string;
+    Investments?: string;
   } | null;
   Port?: {
     Vaults: VaultWithEERConfig[];

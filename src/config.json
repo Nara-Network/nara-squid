@@ -1,6 +1,10 @@
 {
   "arbitrum": {
     "startBlock": 442474975,
+    "Nara": {
+      "ReserveFund": "0x0C56A5471b7A0505f38C0308d932cb18a1d04163",
+      "Investments": "0xaB05c0DB9D26e96A9dcEDCAFCA23341316F6fe6F"
+    },
     "Port": {
       "Strategies": {
         "AAVE": {
