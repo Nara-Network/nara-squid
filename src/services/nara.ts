@@ -438,14 +438,28 @@ async function getMetricsAtBlock(
   }
 
   const {
-    rawSupply: naraUsdSupply,
-    formattedSupply: naraUsdSupplyFormatted,
+    rawSupply: naraUsdRawSupply,
+    formattedSupply: naraUsdRawSupplyFormatted,
     decimals: naraUsdDecimals,
   } = await getFormattedSupply(ctx, naraUsdToken, blockHeight);
-  const { formattedSupply: naraUsdPlusSupplyFormatted } = await getFormattedSupply(ctx, naraUsdPlusToken, blockHeight);
+  const naraUsdPlusAssetsRaw = BigInt(
+    await readContract(
+      ctx,
+      naraUsdPlusToken.address,
+      NaraUSDPlusAbi,
+      'totalAssets',
+      [],
+      blockHeight
+    )
+  );
+  const naraUsdPlusAssetsFormatted = BigDecimal(naraUsdPlusAssetsRaw.toString()).div(
+    BigDecimal((10n ** BigInt(naraUsdDecimals)).toString())
+  );
+  const naraUsdSupply = naraUsdRawSupply + naraUsdPlusAssetsRaw;
+  const naraUsdSupplyFormatted = naraUsdRawSupplyFormatted.add(naraUsdPlusAssetsFormatted);
 
   const percentageStaked = naraUsdSupply > 0n
-    ? naraUsdPlusSupplyFormatted.mul(BigDecimal(100)).div(naraUsdSupplyFormatted)
+    ? naraUsdPlusAssetsFormatted.mul(BigDecimal(100)).div(naraUsdSupplyFormatted)
     : BigDecimal(0);
 
   return {
