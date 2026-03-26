@@ -410,6 +410,23 @@ async function getReserveFundFormatted(
   }
 }
 
+async function getNaraUsdCashFormatted(ctx: ProcessorContext): Promise<BigDecimal | null> {
+  const naraUsdToken = await getTokenBySymbol(ctx, NARA_USD_SYMBOL);
+  if (!naraUsdToken) {
+    ctx.log.warn(`[NARA] Token ${NARA_USD_SYMBOL} not found for network=${ctx.syncedNetwork}`);
+    return null;
+  }
+
+  try {
+    return await getAccountBalanceUsd(naraUsdToken.address, ctx.syncedNetwork);
+  } catch (error) {
+    ctx.log.warn(
+      `[NARA] Failed to fetch ${NARA_USD_SYMBOL} contract balance for address=${naraUsdToken.address} network=${ctx.syncedNetwork}: ${String(error)}`
+    );
+    return null;
+  }
+}
+
 async function getMetricsAtBlock(
   ctx: ProcessorContext,
   config: Config,
@@ -556,17 +573,28 @@ async function refreshWalletBackedMetrics(
 ): Promise<NaraGlobalStats> {
   const reserveFundWallet = config.Nara?.ReserveFund;
   const investmentsWallet = config.Nara?.Investments;
+  const previousReserveFundFormatted = naraGlobalStats.reserveFundFormatted;
+  const previousNaraUsdCashFormatted = naraGlobalStats.cashAndEquivalentsFormatted.minus(
+    previousReserveFundFormatted
+  );
 
-  const [reserveFundFormatted, investmentAssetsFormatted] = await Promise.all([
+  const [reserveFundFormatted, naraUsdCashFormatted, investmentAssetsFormatted] = await Promise.all([
     getReserveFundFormatted(ctx, reserveFundWallet),
+    getNaraUsdCashFormatted(ctx),
     investmentsWallet ? getInvestmentAssetsFormatted(ctx, config, portVaults, blockHeight) : Promise.resolve(BigDecimal(0)),
   ]);
 
-  if (reserveFundFormatted !== null) {
-    naraGlobalStats.reserveFundFormatted = reserveFundFormatted;
-  }
+  const nextReserveFundFormatted = reserveFundFormatted ?? previousReserveFundFormatted;
+  const nextNaraUsdCashFormatted = naraUsdCashFormatted ?? previousNaraUsdCashFormatted;
 
+  naraGlobalStats.reserveFundFormatted = nextReserveFundFormatted;
   naraGlobalStats.investmentAssetsFormatted = investmentAssetsFormatted;
+  naraGlobalStats.cashAndEquivalentsFormatted = nextNaraUsdCashFormatted.add(
+    nextReserveFundFormatted
+  );
+  naraGlobalStats.totalAssetsFormatted = naraGlobalStats.cashAndEquivalentsFormatted.add(
+    naraGlobalStats.investmentAssetsFormatted
+  );
   LAST_WALLET_BALANCE_REFRESH_AT.set(
     getWalletRefreshCacheKey(ctx),
     ctx.blocks[ctx.blocks.length - 1].header.timestamp
@@ -668,8 +696,9 @@ async function updateGlobalStats(
   naraGlobalStats.protocolBackingRatio = metrics.naraUsdSupply > 0n
     ? metrics.naraUsdSupplyFormatted.add(naraGlobalStats.reserveFundFormatted).div(metrics.naraUsdSupplyFormatted)
     : BigDecimal(0);
-  naraGlobalStats.cashAndEquivalentsFormatted = metrics.naraUsdSupplyFormatted.add(naraGlobalStats.reserveFundFormatted);
-  naraGlobalStats.totalAssetsFormatted = naraGlobalStats.cashAndEquivalentsFormatted.add(naraGlobalStats.investmentAssetsFormatted);
+  naraGlobalStats.totalAssetsFormatted = naraGlobalStats.cashAndEquivalentsFormatted.add(
+    naraGlobalStats.investmentAssetsFormatted
+  );
 
   if (!isSynced) {
     naraGlobalStats.updatedAt = metrics.updatedAt;
