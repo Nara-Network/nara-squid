@@ -22,6 +22,15 @@ export class NaraApyChartPoint {
     block!: bigint
 
     @BigIntColumn_({nullable: false})
+    updatedAt!: bigint
+
+    @BigIntColumn_({nullable: false})
+    exchangeRate!: bigint
+
+    @BigIntColumn_({nullable: false})
+    apr!: bigint
+
+    @BigIntColumn_({nullable: false})
     apy7d!: bigint
 
     @BigIntColumn_({nullable: false})

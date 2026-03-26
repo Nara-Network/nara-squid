@@ -1,5 +1,4 @@
 import {
-  Token,
   User,
   PortVault,
   PortDeposit,
@@ -40,7 +39,6 @@ import * as ERC20Abi from '../../abi/ERC20';
 import * as NaraUSD from '../../abi/NaraUSD';
 
 import { Config } from '../types';
-import { toEntityMap } from '../mapping/helpers';
 
 import { getTrackedTokenAddress, initializeTokens } from '../mapping/baseTokens';
 import { portService } from '../../services/port';
@@ -50,7 +48,6 @@ import { parserService } from '../../services/parser';
 import { eerService } from '../../services/eer';
 import { naraService } from '../../services/nara';
 import { transparencyService } from '../../services/transparency';
-import { floorToHour } from '../utils/time';
 
 function getActiveVaults(config: Config, blockHeight: number) {
   return config.Port?.Vaults?.filter((vault) => vault.block <= blockHeight) ?? []
@@ -68,10 +65,6 @@ export async function parseContext(
   poolSizeSyncTsDelay: number
 ): Promise<void> {
   await initializeTokens(ctx)
-
-  // let currencies: Map<string, Token> = await ctx.store
-  //   .findBy(Token, { network: ctx.syncedNetwork })
-  //   .then(toEntityMap)
 
   let users: Map<string, User> = new Map()
   let portVaults: Map<string, PortVault> = new Map()
@@ -144,10 +137,6 @@ export async function parseContext(
         }
       }
     }
-
-    ctx.log.info(
-      `BATCH_BLOCKS first=${firstHeight} last=${lastHeight} count=${actualCount} expected=${expectedCount}`
-    )
   } else {
     ctx.log.info(
       `FILTERED_BATCH_BLOCKS first=${firstHeight} last=${lastHeight} delivered=${actualCount}`
@@ -499,7 +488,7 @@ export async function parseContext(
       block.header.timestamp,
     ))
 
-    if (transparencyService.shouldCaptureDailySnapshot(block.header.timestamp, nextBlock?.header.timestamp)) {
+    if (!ctx.isHead && transparencyService.shouldCaptureDailySnapshot(block.header.timestamp, nextBlock?.header.timestamp)) {
       ; ({
         naraSupplyChartPoints,
         naraTvlChartPoints,
@@ -510,7 +499,23 @@ export async function parseContext(
         blockHeight: block.header.height,
         blockTimestamp: block.header.timestamp,
         portVaults,
-        portNavUpdates,
+        naraSupplyChartPoints,
+        naraTvlChartPoints,
+        naraApyChartPoints,
+      }))
+    }
+
+    if (ctx.isHead && ctx.blocks.length === 1) {
+      ; ({
+        naraSupplyChartPoints,
+        naraTvlChartPoints,
+        naraApyChartPoints,
+      } = await transparencyService.refreshLatestNaraSnapshotsIfDue({
+        ctx,
+        config,
+        blockHeight: block.header.height,
+        blockTimestamp: block.header.timestamp,
+        portVaults,
         naraSupplyChartPoints,
         naraTvlChartPoints,
         naraApyChartPoints,
@@ -571,11 +576,4 @@ export async function parseContext(
   // Update batch audit finishedAt timestamp
   batchAudit.finishedAt = BigInt(Date.now())
   await ctx.store.upsert(batchAudit)
-
-  // Throw if latest block number > 41019999
-  // if (exitBlock >= 41019999) {
-  //   // Print block timestamps before throwing error
-  //   ctx.log.info('Block timestamps tracked:');
-  //   throw new Error(`Exited at block ${exitBlock}`);
-  // }
 }

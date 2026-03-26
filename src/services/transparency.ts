@@ -6,17 +6,21 @@ import {
   NaraSupplyChartPoint,
   NaraTvlChartPoint,
   Network,
-  PortNavUpdate,
   PortVault,
-  PortVaultType,
 } from '../model';
 import { naraService } from './nara';
 import { portService } from './port';
+
+const LATEST_APY_REFRESH_INTERVAL_MS = 30 * 60 * 1000;
 
 function getDayEndTimestamp(timestampMs: number): number {
   const date = new Date(timestampMs);
   date.setUTCHours(23, 59, 59, 999);
   return date.getTime();
+}
+
+function getDailyPointId(network: Network, timestampMs: number): string {
+  return `${network}-${timestampMs}`;
 }
 
 function normalizeNetworkSlug(network: Network): string {
@@ -32,10 +36,53 @@ function normalizeNetworkSlug(network: Network): string {
 
 function shouldCaptureDailySnapshot(currentTimestamp: number, nextTimestamp?: number): boolean {
   if (nextTimestamp == null) {
-    return true;
+    return false;
   }
 
   return getDayEndTimestamp(currentTimestamp) !== getDayEndTimestamp(nextTimestamp);
+}
+
+async function buildNaraApyChartPoint(params: {
+  ctx: ProcessorContext;
+  blockHeight: number;
+  blockTimestamp: number;
+  naraApyChartPoints: Map<string, NaraApyChartPoint>;
+}): Promise<NaraApyChartPoint> {
+  const {
+    ctx,
+    blockHeight,
+    blockTimestamp,
+    naraApyChartPoints,
+  } = params;
+
+  const snapshotTimestamp = getDayEndTimestamp(blockTimestamp);
+  const currentExchangeRate = await naraService.getNaraUsdPlusExchangeRateAtBlock(ctx, blockHeight);
+  const [apr, apy7d, apy14d, apy30d] = currentExchangeRate == null
+    ? [
+        null as bigint | null,
+        { apr: null as bigint | null },
+        { apr: null as bigint | null },
+        { apr: null as bigint | null },
+      ]
+    : await Promise.all([
+        naraService.calculateActualAPR(ctx, currentExchangeRate, blockTimestamp, naraApyChartPoints),
+        naraService.calculateRollingAPR(ctx, currentExchangeRate, blockTimestamp, 7, naraApyChartPoints),
+        naraService.calculateRollingAPR(ctx, currentExchangeRate, blockTimestamp, 14, naraApyChartPoints),
+        naraService.calculateRollingAPR(ctx, currentExchangeRate, blockTimestamp, 30, naraApyChartPoints),
+      ]);
+
+  return new NaraApyChartPoint({
+    id: getDailyPointId(ctx.syncedNetwork, snapshotTimestamp),
+    network: ctx.syncedNetwork,
+    timestamp: BigInt(snapshotTimestamp),
+    block: BigInt(blockHeight),
+    updatedAt: BigInt(blockTimestamp),
+    exchangeRate: currentExchangeRate ?? 0n,
+    apr: apr ?? 0n,
+    apy7d: apy7d.apr ?? 0n,
+    apy14d: apy14d.apr ?? 0n,
+    apy30d: apy30d.apr ?? 0n,
+  });
 }
 
 async function captureDailySnapshotsForBlock(params: {
@@ -44,7 +91,6 @@ async function captureDailySnapshotsForBlock(params: {
   blockHeight: number;
   blockTimestamp: number;
   portVaults: Map<string, PortVault>;
-  portNavUpdates: Map<string, PortNavUpdate>;
   naraSupplyChartPoints: Map<string, NaraSupplyChartPoint>;
   naraTvlChartPoints: Map<string, NaraTvlChartPoint>;
   naraApyChartPoints: Map<string, NaraApyChartPoint>;
@@ -59,7 +105,6 @@ async function captureDailySnapshotsForBlock(params: {
     blockHeight,
     blockTimestamp,
     portVaults,
-    portNavUpdates,
     naraSupplyChartPoints,
     naraTvlChartPoints,
     naraApyChartPoints,
@@ -70,7 +115,7 @@ async function captureDailySnapshotsForBlock(params: {
 
   const naraMetrics = await naraService.getMetricsAtBlock(ctx, config, blockHeight, blockTimestamp);
   if (naraMetrics) {
-    const supplyPointId = `${ctx.syncedNetwork}-${snapshotTimestamp}`;
+    const supplyPointId = getDailyPointId(ctx.syncedNetwork, snapshotTimestamp);
     naraSupplyChartPoints.set(
       supplyPointId,
       new NaraSupplyChartPoint({
@@ -92,13 +137,6 @@ async function captureDailySnapshotsForBlock(params: {
   );
   const tvlByChain = new Map<string, bigint>();
 
-  let weightedApy7d = 0n;
-  let weightedApy14d = 0n;
-  let weightedApy30d = 0n;
-  let weight7d = 0n;
-  let weight14d = 0n;
-  let weight30d = 0n;
-
   for (const portVault of portVaults.values()) {
     if (!activeVaultAddresses.has(portVault.address.toLowerCase())) {
       continue;
@@ -109,62 +147,6 @@ async function captureDailySnapshotsForBlock(params: {
     const chain = normalizeNetworkSlug(portVault.network);
 
     tvlByChain.set(chain, (tvlByChain.get(chain) ?? 0n) + currentTvl18);
-
-    if (portVault.type !== PortVaultType.STANDARD || currentTvl18 <= 0n) {
-      continue;
-    }
-
-    const startApyCalculationTimestamp = activeVaultConfigs.find(
-      (vault) => vault.address.toLowerCase() === portVault.address.toLowerCase()
-    )?.StartApyCalculationTimestamp;
-
-    const [apy7d, apy14d, apy30d] = await Promise.all([
-      portService.calculateRollingAPR(
-        ctx,
-        portVault.address,
-        portVault.currentNav,
-        blockTimestamp,
-        7,
-        portVault.startedAt,
-        startApyCalculationTimestamp,
-        portNavUpdates
-      ),
-      portService.calculateRollingAPR(
-        ctx,
-        portVault.address,
-        portVault.currentNav,
-        blockTimestamp,
-        14,
-        portVault.startedAt,
-        startApyCalculationTimestamp,
-        portNavUpdates
-      ),
-      portService.calculateRollingAPR(
-        ctx,
-        portVault.address,
-        portVault.currentNav,
-        blockTimestamp,
-        30,
-        portVault.startedAt,
-        startApyCalculationTimestamp,
-        portNavUpdates
-      ),
-    ]);
-
-    if (apy7d.apr !== null) {
-      weightedApy7d += apy7d.apr * currentTvl18;
-      weight7d += currentTvl18;
-    }
-
-    if (apy14d.apr !== null) {
-      weightedApy14d += apy14d.apr * currentTvl18;
-      weight14d += currentTvl18;
-    }
-
-    if (apy30d.apr !== null) {
-      weightedApy30d += apy30d.apr * currentTvl18;
-      weight30d += currentTvl18;
-    }
   }
 
   for (const [chain, tvlUsd] of tvlByChain.entries()) {
@@ -182,19 +164,13 @@ async function captureDailySnapshotsForBlock(params: {
     );
   }
 
-  const apyPointId = `${ctx.syncedNetwork}-${snapshotTimestamp}`;
-  naraApyChartPoints.set(
-    apyPointId,
-    new NaraApyChartPoint({
-      id: apyPointId,
-      network: ctx.syncedNetwork,
-      timestamp: BigInt(snapshotTimestamp),
-      block,
-      apy7d: weight7d > 0n ? weightedApy7d / weight7d : 0n,
-      apy14d: weight14d > 0n ? weightedApy14d / weight14d : 0n,
-      apy30d: weight30d > 0n ? weightedApy30d / weight30d : 0n,
-    })
-  );
+  const apyPoint = await buildNaraApyChartPoint({
+    ctx,
+    blockHeight,
+    blockTimestamp,
+    naraApyChartPoints,
+  });
+  naraApyChartPoints.set(apyPoint.id, apyPoint);
 
   return {
     naraSupplyChartPoints,
@@ -203,7 +179,62 @@ async function captureDailySnapshotsForBlock(params: {
   };
 }
 
+async function refreshLatestNaraSnapshotsIfDue(params: {
+  ctx: ProcessorContext;
+  config: Config;
+  blockHeight: number;
+  blockTimestamp: number;
+  portVaults: Map<string, PortVault>;
+  naraSupplyChartPoints: Map<string, NaraSupplyChartPoint>;
+  naraTvlChartPoints: Map<string, NaraTvlChartPoint>;
+  naraApyChartPoints: Map<string, NaraApyChartPoint>;
+}): Promise<{
+  naraSupplyChartPoints: Map<string, NaraSupplyChartPoint>;
+  naraTvlChartPoints: Map<string, NaraTvlChartPoint>;
+  naraApyChartPoints: Map<string, NaraApyChartPoint>;
+}> {
+  const {
+    ctx,
+    config,
+    blockHeight,
+    blockTimestamp,
+    portVaults,
+    naraSupplyChartPoints,
+    naraTvlChartPoints,
+    naraApyChartPoints,
+  } = params;
+
+  const snapshotTimestamp = getDayEndTimestamp(blockTimestamp);
+  const pointId = getDailyPointId(ctx.syncedNetwork, snapshotTimestamp);
+  const existingPoint = naraApyChartPoints.get(pointId) ?? await ctx.store.findOne(NaraApyChartPoint, {
+    where: { id: pointId },
+  });
+
+  if (
+    existingPoint &&
+    (blockTimestamp - Number(existingPoint.updatedAt)) < LATEST_APY_REFRESH_INTERVAL_MS
+  ) {
+    return {
+      naraSupplyChartPoints,
+      naraTvlChartPoints,
+      naraApyChartPoints,
+    };
+  }
+
+  return captureDailySnapshotsForBlock({
+    ctx,
+    config,
+    blockHeight,
+    blockTimestamp,
+    portVaults,
+    naraSupplyChartPoints,
+    naraTvlChartPoints,
+    naraApyChartPoints,
+  });
+}
+
 export const transparencyService = {
   captureDailySnapshotsForBlock,
+  refreshLatestNaraSnapshotsIfDue,
   shouldCaptureDailySnapshot,
 };

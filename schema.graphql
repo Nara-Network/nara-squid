@@ -37,6 +37,9 @@ type NaraGlobalStats @entity {
   investmentAssetsFormatted: BigDecimal!
   cashAndEquivalentsFormatted: BigDecimal!
   totalAssetsFormatted: BigDecimal!
+  apy7d: BigInt!
+  apy14d: BigInt!
+  apy30d: BigInt!
   weightedApy7d: BigInt!
   weightedTenorDays: Int
   updatedAt: BigInt!
@@ -65,6 +68,9 @@ type NaraApyChartPoint @entity {
   network: Network! @index
   timestamp: BigInt! @index
   block: BigInt!
+  updatedAt: BigInt!
+  exchangeRate: BigInt!
+  apr: BigInt!
   apy7d: BigInt!
   apy14d: BigInt!
   apy30d: BigInt!

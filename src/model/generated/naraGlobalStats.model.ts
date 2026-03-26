@@ -43,6 +43,15 @@ export class NaraGlobalStats {
     totalAssetsFormatted!: BigDecimal
 
     @BigIntColumn_({nullable: false})
+    apy7d!: bigint
+
+    @BigIntColumn_({nullable: false})
+    apy14d!: bigint
+
+    @BigIntColumn_({nullable: false})
+    apy30d!: bigint
+
+    @BigIntColumn_({nullable: false})
     weightedApy7d!: bigint
 
     @IntColumn_({nullable: true})
