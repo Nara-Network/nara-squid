@@ -537,6 +537,12 @@ export async function parseContext(
 
   ({ portVaults } = await portService.updateAllVaultTvl(ctx, portVaults, config))
 
+  naraSupplyChartPoints = await transparencyService.backfillNaraSupplyChartPoints({
+    ctx,
+    config,
+    naraSupplyChartPoints,
+  });
+
   naraGlobalStats = await naraService.updateGlobalStats(ctx, config, naraGlobalStats, portVaults, portNavUpdates)
 
   // await ctx.store.upsert([...currencies.values()])

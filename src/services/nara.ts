@@ -1,4 +1,5 @@
 import * as ERC20Abi from '../abi/ERC20';
+import * as NaraUSDAbi from '../abi/NaraUSD';
 import * as NaraUSDPlusAbi from '../abi/NaraUSDPlus';
 import * as AccountantAbi from '../abi/AccountantWithRateProviders';
 import { BigDecimal } from '@subsquid/big-decimal';
@@ -410,7 +411,10 @@ async function getReserveFundFormatted(
   }
 }
 
-async function getNaraUsdCashFormatted(ctx: ProcessorContext): Promise<BigDecimal | null> {
+async function getNaraUsdCashFormatted(
+  ctx: ProcessorContext,
+  blockHeight: number
+): Promise<BigDecimal | null> {
   const naraUsdToken = await getTokenBySymbol(ctx, NARA_USD_SYMBOL);
   if (!naraUsdToken) {
     ctx.log.warn(`[NARA] Token ${NARA_USD_SYMBOL} not found for network=${ctx.syncedNetwork}`);
@@ -418,10 +422,41 @@ async function getNaraUsdCashFormatted(ctx: ProcessorContext): Promise<BigDecima
   }
 
   try {
-    return await getAccountBalanceUsd(naraUsdToken.address, ctx.syncedNetwork);
+    const assetAddress = String(
+      await readContract(
+        ctx,
+        naraUsdToken.address,
+        NaraUSDAbi,
+        'asset',
+        [],
+        blockHeight
+      )
+    ).toLowerCase();
+    const assetDecimals = Number(
+      await readContract(
+        ctx,
+        assetAddress,
+        ERC20Abi,
+        'decimals',
+        [],
+        blockHeight
+      )
+    );
+    const assetBalanceRaw = BigInt(
+      await readContract(
+        ctx,
+        assetAddress,
+        ERC20Abi,
+        'balanceOf',
+        { account: naraUsdToken.address },
+        blockHeight
+      )
+    );
+
+    return formatRawAmount(assetBalanceRaw, assetDecimals);
   } catch (error) {
     ctx.log.warn(
-      `[NARA] Failed to fetch ${NARA_USD_SYMBOL} contract balance for address=${naraUsdToken.address} network=${ctx.syncedNetwork}: ${String(error)}`
+      `[NARA] Failed to fetch ${NARA_USD_SYMBOL} contract cash balance for address=${naraUsdToken.address} network=${ctx.syncedNetwork}: ${String(error)}`
     );
     return null;
   }
@@ -580,7 +615,7 @@ async function refreshWalletBackedMetrics(
 
   const [reserveFundFormatted, naraUsdCashFormatted, investmentAssetsFormatted] = await Promise.all([
     getReserveFundFormatted(ctx, reserveFundWallet),
-    getNaraUsdCashFormatted(ctx),
+    getNaraUsdCashFormatted(ctx, blockHeight),
     investmentsWallet ? getInvestmentAssetsFormatted(ctx, config, portVaults, blockHeight) : Promise.resolve(BigDecimal(0)),
   ]);
 

@@ -12,6 +12,13 @@ import { naraService } from './nara';
 import { portService } from './port';
 
 const LATEST_APY_REFRESH_INTERVAL_MS = 30 * 60 * 1000;
+const SUPPLY_BACKFILL_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const LAST_SUPPLY_BACKFILL_AT = new Map<string, number>();
+
+type BlockAtTimestamp = {
+  height: number;
+  timestamp: number;
+};
 
 function getDayEndTimestamp(timestampMs: number): number {
   const date = new Date(timestampMs);
@@ -40,6 +47,60 @@ function shouldCaptureDailySnapshot(currentTimestamp: number, nextTimestamp?: nu
   }
 
   return getDayEndTimestamp(currentTimestamp) !== getDayEndTimestamp(nextTimestamp);
+}
+
+function shouldBackfillNaraSupplyChartPoints(
+  ctx: ProcessorContext,
+  blockTimestamp: number
+): boolean {
+  if (!ctx.isHead || ctx.blocks.length !== 1) {
+    return false;
+  }
+
+  const lastBackfillAt = LAST_SUPPLY_BACKFILL_AT.get(ctx.syncedNetwork) ?? 0;
+  if (lastBackfillAt === 0) {
+    return true;
+  }
+
+  return (blockTimestamp - lastBackfillAt) >= SUPPLY_BACKFILL_INTERVAL_MS;
+}
+
+async function getBlockAtOrBeforeTimestamp(
+  ctx: ProcessorContext,
+  startBlock: number,
+  targetTimestamp: number
+): Promise<BlockAtTimestamp> {
+  let low = startBlock;
+  let high = ctx.blocks[ctx.blocks.length - 1].header.height;
+  let bestMatch: BlockAtTimestamp = {
+    height: startBlock,
+    timestamp: ctx.blocks[0].header.timestamp,
+  };
+
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const block = await ctx._chain.client.call('eth_getBlockByNumber', [
+      `0x${mid.toString(16)}`,
+      false,
+    ]) as { timestamp: string } | null;
+
+    if (!block?.timestamp) {
+      throw new Error(`[NARA] Failed to fetch block ${mid} while resolving snapshot timestamp`);
+    }
+
+    const blockTimestamp = parseInt(block.timestamp, 16) * 1000;
+    if (blockTimestamp <= targetTimestamp) {
+      bestMatch = {
+        height: mid,
+        timestamp: blockTimestamp,
+      };
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  return bestMatch;
 }
 
 async function buildNaraApyChartPoint(params: {
@@ -111,9 +172,18 @@ async function captureDailySnapshotsForBlock(params: {
   } = params;
 
   const snapshotTimestamp = getDayEndTimestamp(blockTimestamp);
-  const block = BigInt(blockHeight);
+  const supplySnapshotBlock = await getBlockAtOrBeforeTimestamp(
+    ctx,
+    config.startBlock,
+    snapshotTimestamp
+  );
 
-  const naraMetrics = await naraService.getMetricsAtBlock(ctx, config, blockHeight, blockTimestamp);
+  const naraMetrics = await naraService.getMetricsAtBlock(
+    ctx,
+    config,
+    supplySnapshotBlock.height,
+    supplySnapshotBlock.timestamp
+  );
   if (naraMetrics) {
     const supplyPointId = getDailyPointId(ctx.syncedNetwork, snapshotTimestamp);
     naraSupplyChartPoints.set(
@@ -122,12 +192,14 @@ async function captureDailySnapshotsForBlock(params: {
         id: supplyPointId,
         network: ctx.syncedNetwork,
         timestamp: BigInt(snapshotTimestamp),
-        block,
+        block: BigInt(supplySnapshotBlock.height),
         naraUsdSupply: naraMetrics.naraUsdSupply,
         naraUsdSupplyFormatted: naraMetrics.naraUsdSupplyFormatted,
       })
     );
   }
+
+  const block = BigInt(blockHeight);
 
   const activeVaultConfigs = (config.Port?.Vaults ?? []).filter(
     (vault) => vault.block <= blockHeight
@@ -233,7 +305,56 @@ async function refreshLatestNaraSnapshotsIfDue(params: {
   });
 }
 
+async function backfillNaraSupplyChartPoints(params: {
+  ctx: ProcessorContext;
+  config: Config;
+  naraSupplyChartPoints: Map<string, NaraSupplyChartPoint>;
+}): Promise<Map<string, NaraSupplyChartPoint>> {
+  const {
+    ctx,
+    config,
+    naraSupplyChartPoints,
+  } = params;
+
+  const blockTimestamp = ctx.blocks[ctx.blocks.length - 1].header.timestamp;
+  if (!shouldBackfillNaraSupplyChartPoints(ctx, blockTimestamp)) {
+    return naraSupplyChartPoints;
+  }
+
+  const existingPoints = await ctx.store.find(NaraSupplyChartPoint, {
+    where: { network: ctx.syncedNetwork },
+    order: { timestamp: 'ASC' },
+  });
+
+  for (const existingPoint of existingPoints) {
+    const supplySnapshotBlock = await getBlockAtOrBeforeTimestamp(
+      ctx,
+      config.startBlock,
+      Number(existingPoint.timestamp)
+    );
+    const metrics = await naraService.getMetricsAtBlock(
+      ctx,
+      config,
+      supplySnapshotBlock.height,
+      supplySnapshotBlock.timestamp
+    );
+
+    if (!metrics) {
+      continue;
+    }
+
+    existingPoint.block = BigInt(supplySnapshotBlock.height);
+    existingPoint.naraUsdSupply = metrics.naraUsdSupply;
+    existingPoint.naraUsdSupplyFormatted = metrics.naraUsdSupplyFormatted;
+    naraSupplyChartPoints.set(existingPoint.id, existingPoint);
+  }
+
+  LAST_SUPPLY_BACKFILL_AT.set(ctx.syncedNetwork, blockTimestamp);
+  return naraSupplyChartPoints;
+}
+
 export const transparencyService = {
+  backfillNaraSupplyChartPoints,
   captureDailySnapshotsForBlock,
   refreshLatestNaraSnapshotsIfDue,
   shouldCaptureDailySnapshot,
