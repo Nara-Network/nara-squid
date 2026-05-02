@@ -78,23 +78,23 @@ export type Configurator = {
 };
 
 export const squidStoreNames: Record<string, string> = {
-  ARBITRUM: 'arbitrum_processor',
-  ARBITRUM_SEPOLIA: 'arbitrum_sepolia_processor'
+  ETHEREUM: 'ethereum_processor',
+  ETHEREUM_SEPOLIA: 'ethereum_sepolia_processor'
 };
 
 const ankrSlugByNetwork = {
-  ARBITRUM: 'arbitrum',
-  ARBITRUM_SEPOLIA: 'arbitrum_sepolia'
+  ETHEREUM: 'eth',
+  ETHEREUM_SEPOLIA: 'eth_sepolia'
 };
 
 const alchemySlugByNetwork = {
-  ARBITRUM: 'arb-mainnet',
-  ARBITRUM_SEPOLIA: 'arb-sepolia'
+  ETHEREUM: 'eth-mainnet',
+  ETHEREUM_SEPOLIA: 'eth-sepolia'
 };
 
 const squidSlugByNetwork = {
-  ARBITRUM: process.env.RPC_ARBITRUM_HTTP,
-  ARBITRUM_SEPOLIA: process.env.RPC_ARBITRUM_SEPOLIA_HTTP
+  ETHEREUM: process.env.RPC_ETHEREUM_HTTP,
+  ETHEREUM_SEPOLIA: process.env.RPC_ETHEREUM_SEPOLIA_HTTP
 };
 
 const alchemyFallbacks = JSON.parse(process.env.ALCHEMY_FALLBACK_NETWORKS || '[]'); // unique key
@@ -103,14 +103,6 @@ const squidFallbacks = JSON.parse(process.env.SQUID_FALLBACK_NETWORKS || '[]'); 
 
 const blastApiKey = process.env.BLAST_API_KEY;
 const ankrApiKey = process.env.ANKR_API_KEY!;
-const arbitrumApiKey = process.env.ANKR_API_KEY_ARBITRUM || process.env.ARBITRUM_API_KEY;
-
-function getAnkrApiKey(network: Network): string {
-  if (network === Network.ARBITRUM || network === Network.ARBITRUM_SEPOLIA) {
-    return arbitrumApiKey ?? ankrApiKey;
-  }
-  return ankrApiKey;
-}
 
 export const getRpcUrl = (network: Network, fallbackKey?: any): string | RpcEndpointSettings => {
   if (alchemyFallbacks.includes(network) && fallbackKey) {
@@ -126,7 +118,7 @@ export const getRpcUrl = (network: Network, fallbackKey?: any): string | RpcEndp
     );
   }
   return {
-    url: `https://rpc.ankr.com/${ankrSlugByNetwork[network as keyof typeof ankrSlugByNetwork]}/${getAnkrApiKey(network)}`,
+    url: `https://rpc.ankr.com/${ankrSlugByNetwork[network as keyof typeof ankrSlugByNetwork]}/${ankrApiKey}`,
     rateLimit: 100,
     maxBatchCallSize: 1000,
   };
@@ -135,6 +127,6 @@ export const getRpcUrl = (network: Network, fallbackKey?: any): string | RpcEndp
 const MINUTE = 60;
 
 export const poolSizeDelayByNetwork = {
-  ARBITRUM: MINUTE,
-  ARBITRUM_SEPOLIA: MINUTE,
+  ETHEREUM: MINUTE,
+  ETHEREUM_SEPOLIA: MINUTE,
 };

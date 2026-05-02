@@ -23,10 +23,10 @@ deploy:
       - squid-typeorm-migration
       - apply
   processor:
-    - name: arbitrum-processor
-      cmd: ['node', 'lib/arbitrum/logs']
-    - name: arbitrum-sepolia-processor
-      cmd: ['node', 'lib/arbitrumSepolia/logs']
+    - name: ethereum-processor
+      cmd: ['node', 'lib/ethereum/logs']
+    - name: ethereum-sepolia-processor
+      cmd: ['node', 'lib/ethereumSepolia/logs']
   api:
     cmd:
       - npx

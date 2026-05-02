@@ -1,6 +1,6 @@
 enum Network {
-  ARBITRUM
-  ARBITRUM_SEPOLIA
+  ETHEREUM
+  ETHEREUM_SEPOLIA
 }
 
 type Token @entity {

@@ -32,10 +32,10 @@ function getDailyPointId(network: Network, timestampMs: number): string {
 
 function normalizeNetworkSlug(network: Network): string {
   switch (network) {
-    case Network.ARBITRUM:
-      return 'arbitrum';
-    case Network.ARBITRUM_SEPOLIA:
-      return 'arbitrum-sepolia';
+    case Network.ETHEREUM:
+      return 'ethereum';
+    case Network.ETHEREUM_SEPOLIA:
+      return 'ethereum-sepolia';
     default:
       return String(network).toLowerCase().replace(/_/g, '-');
   }
@@ -178,13 +178,11 @@ async function captureDailySnapshotsForBlock(params: {
     snapshotTimestamp
   );
 
-  const naraMetrics = await naraService.getMetricsAtBlock(
+  const naraUsdSupply = await naraService.getNaraUsdTotalSupplyAtBlock(
     ctx,
-    config,
-    supplySnapshotBlock.height,
-    supplySnapshotBlock.timestamp
+    supplySnapshotBlock.height
   );
-  if (naraMetrics) {
+  if (naraUsdSupply) {
     const supplyPointId = getDailyPointId(ctx.syncedNetwork, snapshotTimestamp);
     naraSupplyChartPoints.set(
       supplyPointId,
@@ -193,8 +191,8 @@ async function captureDailySnapshotsForBlock(params: {
         network: ctx.syncedNetwork,
         timestamp: BigInt(snapshotTimestamp),
         block: BigInt(supplySnapshotBlock.height),
-        naraUsdSupply: naraMetrics.naraUsdSupply,
-        naraUsdSupplyFormatted: naraMetrics.naraUsdSupplyFormatted,
+        naraUsdSupply: naraUsdSupply.rawSupply,
+        naraUsdSupplyFormatted: naraUsdSupply.formattedSupply,
       })
     );
   }
@@ -332,20 +330,18 @@ async function backfillNaraSupplyChartPoints(params: {
       config.startBlock,
       Number(existingPoint.timestamp)
     );
-    const metrics = await naraService.getMetricsAtBlock(
+    const naraUsdSupply = await naraService.getNaraUsdTotalSupplyAtBlock(
       ctx,
-      config,
-      supplySnapshotBlock.height,
-      supplySnapshotBlock.timestamp
+      supplySnapshotBlock.height
     );
 
-    if (!metrics) {
+    if (!naraUsdSupply) {
       continue;
     }
 
     existingPoint.block = BigInt(supplySnapshotBlock.height);
-    existingPoint.naraUsdSupply = metrics.naraUsdSupply;
-    existingPoint.naraUsdSupplyFormatted = metrics.naraUsdSupplyFormatted;
+    existingPoint.naraUsdSupply = naraUsdSupply.rawSupply;
+    existingPoint.naraUsdSupplyFormatted = naraUsdSupply.formattedSupply;
     naraSupplyChartPoints.set(existingPoint.id, existingPoint);
   }
 

@@ -45,8 +45,8 @@ function getFirstEligibleApyTimestamp(days: number): number {
 
 function getAnkrBlockchain(network: Network): string[] | null {
   switch (network) {
-    case Network.ARBITRUM:
-      return ['arbitrum'];
+    case Network.ETHEREUM:
+      return ['eth'];
     default:
       return null;
   }
@@ -58,7 +58,7 @@ function getAnkrApiUrl(): string | null {
     return configuredUrl;
   }
 
-  const apiKey = process.env.ANKR_API_KEY_ARBITRUM || process.env.ARBITRUM_API_KEY || process.env.ANKR_API_KEY;
+  const apiKey = process.env.ANKR_API_KEY;
   if (!apiKey) {
     return null;
   }
@@ -193,6 +193,23 @@ async function getFormattedSupply(
   );
 
   return { rawSupply, formattedSupply, decimals };
+}
+
+async function getNaraUsdTotalSupplyAtBlock(
+  ctx: ProcessorContext,
+  blockHeight: number
+): Promise<{
+  rawSupply: bigint;
+  formattedSupply: BigDecimal;
+  decimals: number;
+} | null> {
+  const naraUsdToken = await getTokenBySymbol(ctx, NARA_USD_SYMBOL);
+  if (!naraUsdToken) {
+    ctx.log.warn(`[NARA] Token ${NARA_USD_SYMBOL} not found for network=${ctx.syncedNetwork}`);
+    return null;
+  }
+
+  return getFormattedSupply(ctx, naraUsdToken, blockHeight);
 }
 
 async function getNaraUsdPlusExchangeRateAtBlock(
@@ -507,8 +524,8 @@ async function getMetricsAtBlock(
   const naraUsdPlusAssetsFormatted = BigDecimal(naraUsdPlusAssetsRaw.toString()).div(
     BigDecimal((10n ** BigInt(naraUsdDecimals)).toString())
   );
-  const naraUsdSupply = naraUsdRawSupply + naraUsdPlusAssetsRaw;
-  const naraUsdSupplyFormatted = naraUsdRawSupplyFormatted.add(naraUsdPlusAssetsFormatted);
+  const naraUsdSupply = naraUsdRawSupply;
+  const naraUsdSupplyFormatted = naraUsdRawSupplyFormatted;
 
   const percentageStaked = naraUsdSupply > 0n
     ? naraUsdPlusAssetsFormatted.mul(BigDecimal(100)).div(naraUsdSupplyFormatted)
@@ -774,6 +791,7 @@ export const naraService = {
   calculateRollingAPR,
   getGlobalStats,
   getNaraUsdPlusExchangeRateAtBlock,
+  getNaraUsdTotalSupplyAtBlock,
   getMetricsAtBlock,
   updateGlobalStats,
 };

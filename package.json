@@ -8,9 +8,9 @@
     "format": "prettier . --write **/*.{js,ts,json} --ignore-path .prettierignore",
     "test": "mocha -r ts-node/register/transpile-only -r tsconfig-paths/register 'src/test/**/*.test.ts'",
     "migrate": "sqd down && sqd typegen && sqd codegen && sqd build && sqd up && sqd migration:generate && sqd migration:apply",
-    "squid:arbitrum": "npm run migrate && sqd process:arbitrum",
-    "squid:arbitrumSepolia": "npm run migrate && sqd process:arbitrumSepolia",
-    "squid": "npm run squid:arbitrum"
+    "squid:ethereum": "npm run migrate && sqd process:ethereum",
+    "squid:ethereumSepolia": "npm run migrate && sqd process:ethereumSepolia",
+    "squid": "npm run squid:ethereum"
   },
   "dependencies": {
     "@subsquid/archive-registry": "^3.3.2",
@@ -19,7 +19,7 @@
     "@subsquid/graphql-server": "^4.8.0",
     "@subsquid/typeorm-migration": "^1.3.0",
     "@subsquid/typeorm-store": "^1.5.1",
-    "axios": "^1.6.8",
+    "axios": "1.6.8",
     "date-fns": "^4.1.0",
     "dotenv": "^16.1.4",
     "ethers": "^6.5.1",

@@ -8,7 +8,7 @@ import * as erc20Abi from '../../abi/ERC20';
 import { DateTime } from 'luxon';
 import { toWei } from './decimal';
 import { tokensService } from '../../services/tokens';
-import { arbitrum, arbitrumSepolia } from 'viem/chains';
+import { mainnet, sepolia } from 'viem/chains';
 
 // TODO: NEED TO UPDATE! IS THIS JUST SEPOLIA?
 export const MULTICALL_ADDRESS = '0xcA11bde05977b3631167028862bE2a173976CA11';
@@ -185,5 +185,5 @@ export const rewardRateToAPR = (
   return apr;
 };
 
-export const SupportedChainIds = [arbitrumSepolia.id, arbitrum.id] as const;
+export const SupportedChainIds = [sepolia.id, mainnet.id] as const;
 export type SupportedChainId = typeof SupportedChainIds[number];
