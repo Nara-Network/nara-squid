@@ -1,6 +1,6 @@
 import { startOfDay, isEqual } from 'date-fns'
 import { Network } from '../model';
-import { ProcessorContext } from '../common/processor';
+import { ProcessorContext } from '../common/dataSet';
 import { AbiFunction, FunctionArguments, FunctionReturn } from '@subsquid/evm-abi';
 import { BigDecimal } from '@subsquid/big-decimal';
 import { parseUnits } from 'viem';

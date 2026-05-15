@@ -1,5 +1,5 @@
 import { Network, Token, } from '../../model';
-import { ProcessorContext } from '../processor';
+import { ProcessorContext } from '../dataSet';
 import { toEntityMap } from './helpers';
 
 export async function filterCurrencies(

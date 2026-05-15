@@ -1,5 +1,5 @@
 import { Network, Token } from '../../model';
-import { ProcessorContext } from '../processor';
+import { ProcessorContext } from '../dataSet';
 import { BigDecimal } from '@subsquid/big-decimal';
 import { getTokenId } from './helpers';
 import { tokensService } from '../../services/tokens';
@@ -71,13 +71,41 @@ export const TRACKED_TOKENS: TokenConfig[] = [
     },
     {
         symbol: 'USDC',
-        address: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',
+        address: '0x2F6F07CDcf3588944Bf4C42aC74ff24bF56e7590',
         name: 'USD Coin',
         network: Network.ETHEREUM_SEPOLIA,
         decimals: 6n,
         tvlMultiplier: 1,
         fallbackPrice: 1,
         coinGeckoId: 'usd-coin',
+    },
+    {
+        symbol: 'USDT',
+        address: '0xF3F2b4815A58152c9BE53250275e8211163268BA',
+        name: 'Tether USD',
+        network: Network.ETHEREUM_SEPOLIA,
+        decimals: 6n,
+        tvlMultiplier: 1,
+        fallbackPrice: 1,
+        coinGeckoId: 'usd-coin',
+    },
+        {
+        symbol: 'NaraUSD',
+        address: '0x0e26A4E2dCb28796E3088345B6bAc3D46192bF17',
+        name: 'NaraUSD',
+        network: Network.ETHEREUM_SEPOLIA,
+        decimals: 18n,
+        tvlMultiplier: 1,
+        fallbackPrice: 1,
+    },
+    {
+        symbol: 'NaraUSD+',
+        address: '0xfe3D71E78D58503c82559357fBdE52863B5969dc',
+        name: 'NaraUSD',
+        network: Network.ETHEREUM_SEPOLIA,
+        decimals: 18n,
+        tvlMultiplier: 1,
+        fallbackPrice: 1,
     },
 ];
 

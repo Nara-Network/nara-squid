@@ -1,5 +1,5 @@
 import { normalizeDecimals } from '../helpers/common';
-import { ProcessorContext } from '../common/processor';
+import { ProcessorContext } from '../common/dataSet';
 import { Config } from '../common/types';
 import {
   NaraApyChartPoint,

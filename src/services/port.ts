@@ -1,4 +1,4 @@
-import { ProcessorContext } from '../common/processor';
+import { ProcessorContext } from '../common/dataSet';
 
 import { Config } from '../common/types';
 import { calculateUsdPriceInBN, convertToBaseTokenAmount, readContract } from '../helpers/common';

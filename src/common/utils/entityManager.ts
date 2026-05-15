@@ -1,4 +1,4 @@
-import { assertNotNull } from '@subsquid/evm-processor';
+import { assertNotNull } from '@subsquid/util-internal';
 import { Store } from '@subsquid/typeorm-store';
 import { In } from 'typeorm';
 import splitIntoBatches from './splitIntoBatches';
