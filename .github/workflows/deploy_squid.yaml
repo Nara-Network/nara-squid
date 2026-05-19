@@ -5,11 +5,14 @@ on:
   # Allows the workflow to be triggered manually from the GitHub Actions tab
   workflow_dispatch:
     inputs:
+      version:
+        type: string
+        description: Squid version to deploy (-s flag)
+        required: true
       deploy_to_prod:
         type: boolean
         description: Deploy to production?
-        required: false
-        default: false
+        required: true
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
@@ -52,4 +55,4 @@ jobs:
 
       # Deploy Squid
       - name: Deploy Squid
-        run: npx sqd deploy "." --org ozean --allow-update --no-stream-logs
+        run: npx sqd deploy . -n nara-squid -s ${{ github.event.inputs.version }}
