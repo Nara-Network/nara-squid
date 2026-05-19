@@ -4,7 +4,7 @@
  * Directly queries config.json for EER configuration.
  */
 
-import { Log } from '../common/processor';
+import { Log } from '../common/dataSet';
 import { Config, ExpectedExchangeRateConfig } from '../common/types';
 import { PortRequestFulfilled } from '../model';
 
@@ -70,7 +70,7 @@ export function getUnionAssets(config: Config): string[] {
 
 /**
  * Extract vault address from Transfer log topics
- * Since we filter by topic1/topic2 in processor, one of them must be the vault
+ * Since we filter by topic1/topic2 in the data set, one of them must be the vault
  * Returns the vault address if found, undefined otherwise
  */
 export function getVaultAddressFromTransferLog(

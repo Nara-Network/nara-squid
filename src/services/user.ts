@@ -1,6 +1,6 @@
 import { Network, User } from '../model';
 
-import { ProcessorContext } from '../common/processor';
+import { ProcessorContext } from '../common/dataSet';
 import { isTestnet } from '../helpers/common';
 
 async function getUserById(ctx: ProcessorContext, id: string): Promise<User | undefined> {

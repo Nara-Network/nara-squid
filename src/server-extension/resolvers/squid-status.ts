@@ -27,7 +27,7 @@ export class SquidStatusResolver {
   @Query(() => SquidStatusOutput)
   async meta(@Arg('network', () => Network) network: Network): Promise<SquidStatusOutput> {
     const manager = await this.tx();
-    if (!squidStoreNames[network]) throw 'No processor available';
+    if (!squidStoreNames[network]) throw 'No data set available';
 
     let [status, hotBlock] = await manager.query(`
             (SELECT height FROM ${squidStoreNames[network]}.status WHERE id = 0 LIMIT 1) UNION

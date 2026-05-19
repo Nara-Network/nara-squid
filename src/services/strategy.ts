@@ -1,4 +1,4 @@
-import { ProcessorContext } from '../common/processor'
+import { ProcessorContext } from '../common/dataSet'
 import { Config, Strategy } from '../common/types'
 import { PortVault, StrategyPositionSnapshot } from '../model'
 import * as AaveV3PoolAbi from '../abi/AaveV3Pool'

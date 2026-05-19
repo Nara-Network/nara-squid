@@ -2,7 +2,7 @@ import { Multicall } from '../../abi/multicall';
 import { BigDecimal } from '@subsquid/big-decimal';
 import { AbiFunction, FunctionArguments } from '@subsquid/evm-abi';
 import { Network, Token } from '../../model';
-import { Block, Log, ProcessorContext } from '../processor';
+import { Block, Log, ProcessorContext } from '../dataSet';
 
 import * as erc20Abi from '../../abi/ERC20';
 import { DateTime } from 'luxon';

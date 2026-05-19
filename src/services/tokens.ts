@@ -1,5 +1,5 @@
 import { Network, Token } from '../model';
-import { ProcessorContext } from '../common/processor';
+import { ProcessorContext } from '../common/dataSet';
 import { In } from 'typeorm';
 
 const tokenReplacements: Record<string, string> = {
