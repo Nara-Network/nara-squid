@@ -57,4 +57,4 @@ jobs:
 
       # Deploy Squid
       - name: Deploy Squid
-        run: npx sqd deploy . -n nara-squid -s ${{ github.event.inputs.version }} --allow-manifest-override --no-interactive --allow-update
+        run: npx sqd deploy . -o holdex -n nara-squid -s ${{ github.event.inputs.version }} --allow-manifest-override --no-interactive --allow-update
