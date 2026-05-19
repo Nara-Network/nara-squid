@@ -1,4 +1,3 @@
-import { GatewaySettings, RpcEndpointSettings } from '@subsquid/evm-processor';
 import { assertNotNull } from '@subsquid/util-internal';
 import { Network } from '../model';
 
@@ -66,12 +65,11 @@ export type Vault = ContractConfig & {
 }
 
 export type Configurator = {
-  rpc: { archive?: GatewaySettings | string; chain: RpcEndpointSettings | string };
   network: Network;
   configFile: Config;
   startBlock: number;
   storeName: string;
-  finalityConfirmations: number;
+  portalUrl: string;
   syncedBlocksInterval: number;
   batchSizeMulticall: number;
   poolSizeDelayTs: number;
@@ -104,7 +102,10 @@ const squidFallbacks = JSON.parse(process.env.SQUID_FALLBACK_NETWORKS || '[]'); 
 const blastApiKey = process.env.BLAST_API_KEY;
 const ankrApiKey = process.env.ANKR_API_KEY!;
 
-export const getRpcUrl = (network: Network, fallbackKey?: any): string | RpcEndpointSettings => {
+export const getRpcUrl = (
+  network: Network,
+  fallbackKey?: any,
+): string | { url: string; rateLimit?: number; maxBatchCallSize?: number } => {
   if (alchemyFallbacks.includes(network) && fallbackKey) {
     return {
       url: `https://${alchemySlugByNetwork[network as keyof typeof alchemySlugByNetwork]}.g.alchemy.com/v2/${fallbackKey}`,

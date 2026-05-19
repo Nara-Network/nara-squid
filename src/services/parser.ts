@@ -1,5 +1,5 @@
 
-import { ProcessorContext, Log } from '../common/processor';
+import { ProcessorContext, Log } from '../common/dataSet';
 
 import { Config } from '../common/types';
 import { convertToBaseTokenAmount, isTestnet, readContract, normalizeDecimals, clampToZero, getTokenDecimalsCached } from '../helpers/common';

@@ -27,7 +27,7 @@ import {
   NaraRedemptionActivity,
   TotalRequestedAmount,
 } from '../../model';
-import { ProcessorContext } from '../processor';
+import { ProcessorContext } from '../dataSet';
 
 import * as BoringVaultAbi from '../../abi/BoringVault';
 import * as AtomicQueueAbi from '../../abi/AtomicQueue';

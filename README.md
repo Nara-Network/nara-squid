@@ -22,7 +22,7 @@
 2. Set the required environment variables for local development:
 
    - **CMC_API_KEY** - Obtain from [CoinMarketCap](https://coinmarketcap.com/api/).
-   - **ANKR_API_KEY** - Default Ankr key used by all processors.
+   - **ANKR_API_KEY** - Default Ankr key used by all data sets.
    - **MANAGER_API_KEY** - String header used for API requests (you can use any text you want).
 
 3. Generate the TypeORM entities and migrations:
@@ -55,16 +55,16 @@
 
 ### 3. Running
 
-1. Adjust [`src/config.json`](/Users/fsebaste/Desktop/NARA/squid/src/config.json) with the Ethereum and Ethereum Sepolia configuration before running a processor. The repository currently keeps both networks disabled until those addresses are added.
+1. Adjust [`src/config.json`](/Users/fsebaste/Desktop/NARA/squid/src/config.json) with the Ethereum and Ethereum Sepolia configuration before running a data set. The repository currently keeps both networks disabled until those addresses are added.
    `Nara.ReserveFund` now accepts a list of `{ "wallet": "...", "tokenSymbol": "..." }` entries used to compute the protocol backing ratio.
 
-2. Start the processor (the migration scripts will be run automatically):
+2. Start the data set (the migration scripts will be run automatically):
 
    ```
    sqd run
    ```
 
-   Or run a specific processor:
+   Or run a specific data set:
 
    ```
    sqd process:ethereum
@@ -73,7 +73,7 @@
    Check (command.json file) for more details.
    See [docs on database migrations](https://docs.subsquid.io/basics/db-migrations) for more details.
 
-   It is necessary to understand that every processor is independent and has its fallback [see declaration](./src/common/types.ts). By default, all processors are using `Ankr` RPC URL. To be able to change the RPC URL for a specific processor, [Go to the website](https://app.subsquid.io/secrets) and choose the fallback variable `ALCHEMY|BLAST|SQUID` edit the variable and set the network you want to use that fallback.
+   It is necessary to understand that every data set is independent and has its fallback [see declaration](./src/common/types.ts). By default, all data sets are using `Ankr` RPC URL for contract calls. To be able to change the RPC URL for a specific data set, [Go to the website](https://app.subsquid.io/secrets) and choose the fallback variable `ALCHEMY|BLAST|SQUID` edit the variable and set the network you want to use that fallback.
    e.g.
 
    ```json
@@ -103,7 +103,7 @@
 
 ### 4. Enjoy
 
-Enjoy exploring the GraphQL API while the processor is running in the background, parsing and login information of each block of the blockchain.
+Enjoy exploring the GraphQL API while the data set is running in the background, parsing and login information of each block of the blockchain.
 
 ## Dev flow
 

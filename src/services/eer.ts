@@ -14,7 +14,7 @@
  * They only change utilization over time and therefore fee accrual speed.
  */
 
-import { ProcessorContext, Log } from '../common/processor';
+import { ProcessorContext, Log } from '../common/dataSet';
 import { Config } from '../common/types';
 import { BorrowedAssetBalance, ExpectedExchangeRate, ExpectedExchangeRateSnapshot, PortRequestFulfilled, PortVault } from '../model';
 import { getEERConfigForVault } from '../helpers/eer';

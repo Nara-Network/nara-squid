@@ -3,7 +3,7 @@ import * as NaraUSDAbi from '../abi/NaraUSD';
 import * as NaraUSDPlusAbi from '../abi/NaraUSDPlus';
 import * as AccountantAbi from '../abi/AccountantWithRateProviders';
 import { BigDecimal } from '@subsquid/big-decimal';
-import { ProcessorContext } from '../common/processor';
+import { ProcessorContext } from '../common/dataSet';
 import { Config } from '../common/types';
 import { convertToBaseTokenAmount, normalizeDecimals, readContract } from '../helpers/common';
 import { NaraApyChartPoint, NaraGlobalStats, Network, PortNavUpdate, PortVault, PortVaultType, Token } from '../model';

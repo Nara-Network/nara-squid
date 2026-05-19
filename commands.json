@@ -52,12 +52,12 @@
       ]
     },
     "process:ethereum": {
-      "description": "Load .env and start the squid processor",
+      "description": "Load .env and start the squid data set",
       "deps": ["build", "migration:apply"],
       "cmd": ["env", "SQD_EVM_RPC_SPLIT_SIZE=500", "node", "--require=dotenv/config", "lib/ethereum/logs.js"]
     },
     "process:ethereumSepolia": {
-      "description": "Load .env and start the squid processor",
+      "description": "Load .env and start the squid data set",
       "deps": ["build", "migration:apply"],
       "cmd": ["env", "SQD_EVM_RPC_SPLIT_SIZE=500", "node", "--require=dotenv/config", "lib/ethereumSepolia/logs.js"]
     },

@@ -23,9 +23,9 @@ deploy:
       - squid-typeorm-migration
       - apply
   processor:
-    - name: ethereum-processor
+    - name: ethereum-data-set
       cmd: ['node', 'lib/ethereum/logs']
-    - name: ethereum-sepolia-processor
+    - name: ethereum-sepolia-data-set
       cmd: ['node', 'lib/ethereumSepolia/logs']
   api:
     cmd:
