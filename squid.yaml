@@ -1,5 +1,5 @@
 manifestVersion: subsquid.io/v0.1
-name: ozean-squid
+name: nara-squid
 version: 1
 description: 'The very first evm squid from manifest'
 build:
