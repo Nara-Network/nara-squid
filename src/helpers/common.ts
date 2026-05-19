@@ -8,6 +8,143 @@ import { tokensService } from '../services/tokens';
 
 // In-memory cache for token decimals
 const TOKEN_DECIMALS_CACHE = new Map<string, number>();
+const DEFAULT_CONTRACT_CALL_MAX_RETRIES = 5;
+const DEFAULT_CONTRACT_CALL_RETRY_DELAY_MS = 3_000;
+const DEFAULT_CONTRACT_CALL_MAX_RETRY_MS = 30_000;
+
+type ContractCallDiagnostics = {
+  rpcHead?: number;
+  targetBlockAvailable?: boolean;
+  diagnosticsError?: string;
+};
+
+function getPositiveIntegerEnv(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function getBooleanEnv(name: string): boolean {
+  return process.env[name]?.toLowerCase() === 'true';
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function getRpcErrorCode(error: unknown): unknown {
+  return typeof error === 'object' && error !== null && 'code' in error
+    ? (error as { code?: unknown }).code
+    : undefined;
+}
+
+function isRetryableRpcError(error: unknown): boolean {
+  const message = getErrorMessage(error).toLowerCase();
+  const code = getRpcErrorCode(error);
+  return (
+    message.includes('header not found') ||
+    message.includes('timeout') ||
+    message.includes('econnreset') ||
+    message.includes('etimedout') ||
+    message.includes('missing trie node') ||
+    code === 429
+  );
+}
+
+function getBatchBounds(ctx: ProcessorContext): { firstBlock?: number; lastBlock?: number } {
+  const firstBlock = ctx.blocks[0]?.header.height;
+  const lastBlock = ctx.blocks[ctx.blocks.length - 1]?.header.height;
+  return { firstBlock, lastBlock };
+}
+
+async function getContractCallDiagnostics(
+  ctx: ProcessorContext,
+  targetBlock: number
+): Promise<ContractCallDiagnostics> {
+  try {
+    const [rpcHeadHex, targetBlockData] = await Promise.all([
+      ctx._chain.client.call('eth_blockNumber', []),
+      ctx._chain.client.call('eth_getBlockByNumber', [
+        '0x' + targetBlock.toString(16),
+        false,
+      ]),
+    ]);
+    return {
+      rpcHead: Number.parseInt(rpcHeadHex, 16),
+      targetBlockAvailable: targetBlockData != null,
+    };
+  } catch (error) {
+    return {
+      diagnosticsError: getErrorMessage(error),
+    };
+  }
+}
+
+function logContractCallRetry(params: {
+  ctx: ProcessorContext;
+  contract: string;
+  functionName: string;
+  targetBlock: number;
+  attempt: number;
+  maxRetries: number;
+  delayMs: number;
+  error: unknown;
+  diagnostics: ContractCallDiagnostics;
+}) {
+  const { firstBlock, lastBlock } = getBatchBounds(params.ctx);
+  console.warn('[contract-call-retry]', {
+    network: params.ctx.syncedNetwork,
+    contract: params.contract.toLowerCase(),
+    functionName: params.functionName,
+    targetBlock: params.targetBlock,
+    batchFirstBlock: firstBlock,
+    batchLastBlock: lastBlock,
+    isHead: params.ctx.isHead,
+    attempt: params.attempt,
+    maxRetries: params.maxRetries,
+    retryInMs: params.delayMs,
+    rpcHead: params.diagnostics.rpcHead,
+    rpcLagBlocks:
+      params.diagnostics.rpcHead === undefined
+        ? undefined
+        : params.targetBlock - params.diagnostics.rpcHead,
+    targetBlockAvailable: params.diagnostics.targetBlockAvailable,
+    diagnosticsError: params.diagnostics.diagnosticsError,
+    rpcErrorCode: getRpcErrorCode(params.error),
+    rpcErrorMessage: getErrorMessage(params.error),
+  });
+}
+
+function buildContractCallError(params: {
+  ctx: ProcessorContext;
+  contract: string;
+  functionName: string;
+  targetBlock: number;
+  attempts: number;
+  elapsedMs: number;
+  error: unknown;
+  diagnostics: ContractCallDiagnostics;
+}): Error {
+  const { firstBlock, lastBlock } = getBatchBounds(params.ctx);
+  return new Error(
+    [
+      `Contract call failed after ${params.attempts} attempt(s) and ${params.elapsedMs}ms`,
+      `network=${params.ctx.syncedNetwork}`,
+      `contract=${params.contract.toLowerCase()}`,
+      `function=${params.functionName}`,
+      `targetBlock=${params.targetBlock}`,
+      `batch=${firstBlock ?? 'unknown'}-${lastBlock ?? 'unknown'}`,
+      `isHead=${params.ctx.isHead}`,
+      `rpcHead=${params.diagnostics.rpcHead ?? 'unknown'}`,
+      `targetBlockAvailable=${params.diagnostics.targetBlockAvailable ?? 'unknown'}`,
+      `rpcErrorCode=${String(getRpcErrorCode(params.error) ?? 'unknown')}`,
+      `rpcErrorMessage=${getErrorMessage(params.error)}`,
+    ].join(' '),
+  );
+}
 
 export function getStartOfDay(timestamp: number): Date {
   const date = new Date(timestamp);
@@ -61,24 +198,90 @@ export async function readContract<T extends { functions: { [key: string]: AbiFu
   
   // Use provided block height or fall back to the last block in the batch
   const targetBlock = blockHeight || ctx.blocks[ctx.blocks.length - 1].header.height;
-  
-  try {
-    const result = await ctx._chain.client.call('eth_call', [
-      { to: contract, data },
-      '0x' + targetBlock.toString(16)
-    ]);
-    
-    // Check if result is empty or indicates failure
-    if (!result || result === '0x' || result === '0x0') {
-      console.warn(`Contract call returned empty result for function ${String(functionName)} on contract ${contract} at block ${targetBlock}`);
-      throw new Error(`Contract call failed or returned empty result for function ${String(functionName)} on contract ${contract} at block ${targetBlock}`);
+
+  const maxRetries = getPositiveIntegerEnv(
+    'CONTRACT_CALL_MAX_RETRIES',
+    DEFAULT_CONTRACT_CALL_MAX_RETRIES,
+  );
+  const retryDelayMs = getPositiveIntegerEnv(
+    'CONTRACT_CALL_RETRY_DELAY_MS',
+    DEFAULT_CONTRACT_CALL_RETRY_DELAY_MS,
+  );
+  const maxRetryMs = getPositiveIntegerEnv(
+    'CONTRACT_CALL_MAX_RETRY_MS',
+    DEFAULT_CONTRACT_CALL_MAX_RETRY_MS,
+  );
+  const shouldLogRetries = getBooleanEnv('CONTRACT_CALL_LOG_RETRIES');
+  const startedAt = Date.now();
+  let lastDiagnostics: ContractCallDiagnostics = {};
+
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    try {
+      const result = await ctx._chain.client.call('eth_call', [
+        { to: contract, data },
+        '0x' + targetBlock.toString(16)
+      ]);
+
+      // Check if result is empty or indicates failure
+      if (!result || result === '0x' || result === '0x0') {
+        console.warn('[contract-call-empty-result]', {
+          network: ctx.syncedNetwork,
+          contract: contract.toLowerCase(),
+          functionName: String(functionName),
+          targetBlock,
+          isHead: ctx.isHead,
+        });
+        throw new Error(`Contract call failed or returned empty result for function ${String(functionName)} on contract ${contract} at block ${targetBlock}`);
+      }
+
+      return func.decodeResult(result) as FunctionReturn<T['functions'][K]>;
+    } catch (error) {
+      const elapsedMs = Date.now() - startedAt;
+      const hasAttemptsLeft = attempt <= maxRetries;
+      const hasTimeLeft = elapsedMs + retryDelayMs <= maxRetryMs;
+      const shouldRetry =
+        hasAttemptsLeft && hasTimeLeft && isRetryableRpcError(error);
+
+      lastDiagnostics =
+        !shouldRetry || shouldLogRetries
+          ? await getContractCallDiagnostics(ctx, targetBlock)
+          : {};
+
+      if (!shouldRetry) {
+        const enrichedError = buildContractCallError({
+          ctx,
+          contract,
+          functionName: String(functionName),
+          targetBlock,
+          attempts: attempt,
+          elapsedMs,
+          error,
+          diagnostics: lastDiagnostics,
+        });
+        console.error('[contract-call-failed]', enrichedError.message);
+        throw enrichedError;
+      }
+
+      if (shouldLogRetries) {
+        logContractCallRetry({
+          ctx,
+          contract,
+          functionName: String(functionName),
+          targetBlock,
+          attempt,
+          maxRetries,
+          delayMs: retryDelayMs,
+          error,
+          diagnostics: lastDiagnostics,
+        });
+      }
+      await sleep(retryDelayMs);
     }
-    
-    return func.decodeResult(result) as FunctionReturn<T['functions'][K]>;
-  } catch (error) {
-    console.error(`Error calling function ${String(functionName)} on contract ${contract} at block ${targetBlock}:`, error);
-    throw error;
   }
+
+  throw new Error(
+    `Contract call retry loop exited unexpectedly for function ${String(functionName)} on contract ${contract} at block ${targetBlock}`,
+  );
 }
 
 export function convertToBaseTokenAmount(amount: bigint, baseDecimals: bigint, tokenDecimals: bigint): bigint {
