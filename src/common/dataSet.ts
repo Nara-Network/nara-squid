@@ -166,7 +166,9 @@ export function generatePortalDataSet(configurator: Configurator) {
     }
   }
 
-  const naraUsdAddress = getTrackedTokenAddress(configurator.network, 'NaraUSD');
+  const naraUsdAddress = configurator.network === Network.BSC
+    ? undefined
+    : getTrackedTokenAddress(configurator.network, 'NaraUSD');
   if (naraUsdAddress) {
     dataSet.addLog({
       where: {

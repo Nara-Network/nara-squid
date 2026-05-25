@@ -1,6 +1,7 @@
 enum Network {
   ETHEREUM
   ETHEREUM_SEPOLIA
+  BSC
 }
 
 type Token @entity {

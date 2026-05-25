@@ -14,5 +14,10 @@
       "Investments": "0xaB05c0DB9D26e96A9dcEDCAFCA23341316F6fe6F"
     },
     "Port": null
+  },
+  "bsc": {
+    "startBlock": 99608000,
+    "Nara": null,
+    "Port": null
   }
 }

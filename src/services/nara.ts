@@ -52,6 +52,14 @@ function getAnkrBlockchain(network: Network): string[] | null {
   }
 }
 
+function hasNaraYieldMetrics(network: Network): boolean {
+  return network !== Network.BSC;
+}
+
+function hasHubBackingMetrics(config: Config): boolean {
+  return config.Nara != null;
+}
+
 function getAnkrApiUrl(): string | null {
   const configuredUrl = process.env.ANKR_API_URL || process.env.NEXT_PUBLIC_ANKR_API_URL;
   if (configuredUrl) {
@@ -511,25 +519,28 @@ async function getMetricsAtBlock(
     formattedSupply: naraUsdRawSupplyFormatted,
     decimals: naraUsdDecimals,
   } = await getFormattedSupply(ctx, naraUsdToken, blockHeight);
-  const naraUsdPlusAssetsRaw = BigInt(
-    await readContract(
-      ctx,
-      naraUsdPlusToken.address,
-      NaraUSDPlusAbi,
-      'totalAssets',
-      [],
-      blockHeight
-    )
-  );
-  const naraUsdPlusAssetsFormatted = BigDecimal(naraUsdPlusAssetsRaw.toString()).div(
-    BigDecimal((10n ** BigInt(naraUsdDecimals)).toString())
-  );
   const naraUsdSupply = naraUsdRawSupply;
   const naraUsdSupplyFormatted = naraUsdRawSupplyFormatted;
+  let percentageStaked = BigDecimal(0);
 
-  const percentageStaked = naraUsdSupply > 0n
-    ? naraUsdPlusAssetsFormatted.mul(BigDecimal(100)).div(naraUsdSupplyFormatted)
-    : BigDecimal(0);
+  if (hasNaraYieldMetrics(ctx.syncedNetwork)) {
+    const naraUsdPlusAssetsRaw = BigInt(
+      await readContract(
+        ctx,
+        naraUsdPlusToken.address,
+        NaraUSDPlusAbi,
+        'totalAssets',
+        [],
+        blockHeight
+      )
+    );
+    const naraUsdPlusAssetsFormatted = BigDecimal(naraUsdPlusAssetsRaw.toString()).div(
+      BigDecimal((10n ** BigInt(naraUsdDecimals)).toString())
+    );
+    percentageStaked = naraUsdSupply > 0n
+      ? naraUsdPlusAssetsFormatted.mul(BigDecimal(100)).div(naraUsdSupplyFormatted)
+      : BigDecimal(0);
+  }
 
   return {
     naraUsdSupply,
@@ -720,7 +731,8 @@ async function updateGlobalStats(
   portNavUpdates: Map<string, PortNavUpdate>
 ): Promise<NaraGlobalStats> {
   const isSynced = ctx.isHead && ctx.blocks.length === 1;
-  const shouldRefreshWallets = shouldRefreshWalletMetrics(ctx);
+  const hasBackingMetrics = hasHubBackingMetrics(config);
+  const shouldRefreshWallets = hasBackingMetrics && shouldRefreshWalletMetrics(ctx);
 
   if (!isSynced && !shouldRefreshWallets) {
     return naraGlobalStats;
@@ -745,14 +757,24 @@ async function updateGlobalStats(
   naraGlobalStats.naraUsdSupplyFormatted = metrics.naraUsdSupplyFormatted;
   naraGlobalStats.naraUsdDecimals = metrics.naraUsdDecimals;
   naraGlobalStats.percentageStaked = metrics.percentageStaked;
-  naraGlobalStats.protocolBackingRatio = metrics.naraUsdSupply > 0n
+  naraGlobalStats.protocolBackingRatio = hasBackingMetrics && metrics.naraUsdSupply > 0n
     ? metrics.naraUsdSupplyFormatted.add(naraGlobalStats.reserveFundFormatted).div(metrics.naraUsdSupplyFormatted)
-    : BigDecimal(0);
+    : metrics.protocolBackingRatio;
   naraGlobalStats.totalAssetsFormatted = naraGlobalStats.cashAndEquivalentsFormatted.add(
     naraGlobalStats.investmentAssetsFormatted
   );
 
   if (!isSynced) {
+    naraGlobalStats.updatedAt = metrics.updatedAt;
+    return naraGlobalStats;
+  }
+
+  if (!hasNaraYieldMetrics(ctx.syncedNetwork)) {
+    naraGlobalStats.apy7d = 0n;
+    naraGlobalStats.apy14d = 0n;
+    naraGlobalStats.apy30d = 0n;
+    naraGlobalStats.weightedApy7d = 0n;
+    naraGlobalStats.weightedTenorDays = null;
     naraGlobalStats.updatedAt = metrics.updatedAt;
     return naraGlobalStats;
   }
@@ -790,6 +812,7 @@ export const naraService = {
   calculateActualAPR,
   calculateRollingAPR,
   getGlobalStats,
+  hasNaraYieldMetrics,
   getNaraUsdPlusExchangeRateAtBlock,
   getNaraUsdTotalSupplyAtBlock,
   getMetricsAtBlock,
