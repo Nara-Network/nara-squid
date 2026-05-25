@@ -26,6 +26,7 @@ import {
   NaraRedemption,
   NaraRedemptionActivity,
   TotalRequestedAmount,
+  Network,
 } from '../../model';
 import { ProcessorContext } from '../dataSet';
 
@@ -92,7 +93,9 @@ export async function parseContext(
   let naraRedemptions: Map<string, NaraRedemption> = new Map()
   let naraRedemptionActivities: Map<string, NaraRedemptionActivity> = new Map()
   let totalRequestedAmounts: Map<string, TotalRequestedAmount> = new Map()
-  const naraUsdAddress = getTrackedTokenAddress(ctx.syncedNetwork, 'NaraUSD')
+  const naraUsdAddress = ctx.syncedNetwork === Network.BSC
+    ? undefined
+    : getTrackedTokenAddress(ctx.syncedNetwork, 'NaraUSD')
 
     // Initialize port
     ; ({ portVaults, expectedExchangeRates } = await portService.initializePort({

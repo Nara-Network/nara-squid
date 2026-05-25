@@ -27,6 +27,8 @@ deploy:
       cmd: ['node', 'lib/ethereum/logs']
     - name: ethereum-sepolia-data-set
       cmd: ['node', 'lib/ethereumSepolia/logs']
+    - name: bsc-data-set
+      cmd: ['node', 'lib/bsc/logs']
   api:
     cmd:
       - npx

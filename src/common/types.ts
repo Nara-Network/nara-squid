@@ -77,12 +77,14 @@ export type Configurator = {
 
 export const squidStoreNames: Record<string, string> = {
   ETHEREUM: 'ethereum_processor',
-  ETHEREUM_SEPOLIA: 'ethereum_sepolia_processor'
+  ETHEREUM_SEPOLIA: 'ethereum_sepolia_processor',
+  BSC: 'bsc_processor'
 };
 
 const ankrSlugByNetwork = {
   ETHEREUM: 'eth',
-  ETHEREUM_SEPOLIA: 'eth_sepolia'
+  ETHEREUM_SEPOLIA: 'eth_sepolia',
+  BSC: 'bsc'
 };
 
 const alchemySlugByNetwork = {
@@ -92,7 +94,8 @@ const alchemySlugByNetwork = {
 
 const squidSlugByNetwork = {
   ETHEREUM: process.env.RPC_ETHEREUM_HTTP,
-  ETHEREUM_SEPOLIA: process.env.RPC_ETHEREUM_SEPOLIA_HTTP
+  ETHEREUM_SEPOLIA: process.env.RPC_ETHEREUM_SEPOLIA_HTTP,
+  BSC: process.env.RPC_BSC_HTTP
 };
 
 const alchemyFallbacks = JSON.parse(process.env.ALCHEMY_FALLBACK_NETWORKS || '[]'); // unique key
@@ -130,4 +133,5 @@ const MINUTE = 60;
 export const poolSizeDelayByNetwork = {
   ETHEREUM: MINUTE,
   ETHEREUM_SEPOLIA: MINUTE,
+  BSC: MINUTE,
 };

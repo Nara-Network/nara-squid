@@ -10,6 +10,7 @@
     "migrate": "sqd down && sqd typegen && sqd codegen && sqd build && sqd up && sqd migration:generate && sqd migration:apply",
     "squid:ethereum": "npm run migrate && sqd process:ethereum",
     "squid:ethereumSepolia": "npm run migrate && sqd process:ethereumSepolia",
+    "squid:bsc": "npm run migrate && sqd process:bsc",
     "squid": "npm run squid:ethereum"
   },
   "dependencies": {

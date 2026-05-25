@@ -14,6 +14,7 @@ import { portService } from './port';
 const LATEST_APY_REFRESH_INTERVAL_MS = 30 * 60 * 1000;
 const SUPPLY_BACKFILL_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const LAST_SUPPLY_BACKFILL_AT = new Map<string, number>();
+const LAST_LATEST_SUPPLY_REFRESH_AT = new Map<string, number>();
 
 type BlockAtTimestamp = {
   height: number;
@@ -234,13 +235,15 @@ async function captureDailySnapshotsForBlock(params: {
     );
   }
 
-  const apyPoint = await buildNaraApyChartPoint({
-    ctx,
-    blockHeight,
-    blockTimestamp,
-    naraApyChartPoints,
-  });
-  naraApyChartPoints.set(apyPoint.id, apyPoint);
+  if (naraService.hasNaraYieldMetrics(ctx.syncedNetwork)) {
+    const apyPoint = await buildNaraApyChartPoint({
+      ctx,
+      blockHeight,
+      blockTimestamp,
+      naraApyChartPoints,
+    });
+    naraApyChartPoints.set(apyPoint.id, apyPoint);
+  }
 
   return {
     naraSupplyChartPoints,
@@ -275,6 +278,29 @@ async function refreshLatestNaraSnapshotsIfDue(params: {
   } = params;
 
   const snapshotTimestamp = getDayEndTimestamp(blockTimestamp);
+  if (!naraService.hasNaraYieldMetrics(ctx.syncedNetwork)) {
+    const lastSupplyRefreshAt = LAST_LATEST_SUPPLY_REFRESH_AT.get(ctx.syncedNetwork) ?? 0;
+    if (lastSupplyRefreshAt > 0 && blockTimestamp - lastSupplyRefreshAt < LATEST_APY_REFRESH_INTERVAL_MS) {
+      return {
+        naraSupplyChartPoints,
+        naraTvlChartPoints,
+        naraApyChartPoints,
+      };
+    }
+
+    LAST_LATEST_SUPPLY_REFRESH_AT.set(ctx.syncedNetwork, blockTimestamp);
+    return captureDailySnapshotsForBlock({
+      ctx,
+      config,
+      blockHeight,
+      blockTimestamp,
+      portVaults,
+      naraSupplyChartPoints,
+      naraTvlChartPoints,
+      naraApyChartPoints,
+    });
+  }
+
   const pointId = getDailyPointId(ctx.syncedNetwork, snapshotTimestamp);
   const existingPoint = naraApyChartPoints.get(pointId) ?? await ctx.store.findOne(NaraApyChartPoint, {
     where: { id: pointId },

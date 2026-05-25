@@ -8,6 +8,7 @@ import { tokensService } from '../../services/tokens';
 let hasInitialized = {
     [Network.ETHEREUM]: false,
     [Network.ETHEREUM_SEPOLIA]: false,
+    [Network.BSC]: false,
 }
 
 type TokenConfig = {
@@ -103,6 +104,24 @@ export const TRACKED_TOKENS: TokenConfig[] = [
         address: '0xfe3D71E78D58503c82559357fBdE52863B5969dc',
         name: 'NaraUSD',
         network: Network.ETHEREUM_SEPOLIA,
+        decimals: 18n,
+        tvlMultiplier: 1,
+        fallbackPrice: 1,
+    },
+    {
+        symbol: 'NaraUSD',
+        address: '0xA098c88C7a82F9d053809c4C9ec7796599154525',
+        name: 'NaraUSD',
+        network: Network.BSC,
+        decimals: 18n,
+        tvlMultiplier: 1,
+        fallbackPrice: 1,
+    },
+    {
+        symbol: 'NaraUSD+',
+        address: '0x2b8372fCE39714e53026e6F3075154af1F43D5e0',
+        name: 'NaraUSD+',
+        network: Network.BSC,
         decimals: 18n,
         tvlMultiplier: 1,
         fallbackPrice: 1,
