@@ -184,6 +184,10 @@ async function captureDailySnapshotsForBlock(params: {
     supplySnapshotBlock.height
   );
   if (naraUsdSupply) {
+    const naraUsdPlusAssets = await naraService.getNaraUsdPlusTotalAssetsAtBlock(
+      ctx,
+      supplySnapshotBlock.height
+    );
     const supplyPointId = getDailyPointId(ctx.syncedNetwork, snapshotTimestamp);
     naraSupplyChartPoints.set(
       supplyPointId,
@@ -194,6 +198,8 @@ async function captureDailySnapshotsForBlock(params: {
         block: BigInt(supplySnapshotBlock.height),
         naraUsdSupply: naraUsdSupply.rawSupply,
         naraUsdSupplyFormatted: naraUsdSupply.formattedSupply,
+        naraUsdPlusTotalAssets: naraUsdPlusAssets?.rawAssets ?? null,
+        naraUsdPlusTotalAssetsFormatted: naraUsdPlusAssets?.formattedAssets ?? null,
       })
     );
   }
@@ -365,9 +371,16 @@ async function backfillNaraSupplyChartPoints(params: {
       continue;
     }
 
+    const naraUsdPlusAssets = await naraService.getNaraUsdPlusTotalAssetsAtBlock(
+      ctx,
+      supplySnapshotBlock.height
+    );
+
     existingPoint.block = BigInt(supplySnapshotBlock.height);
     existingPoint.naraUsdSupply = naraUsdSupply.rawSupply;
     existingPoint.naraUsdSupplyFormatted = naraUsdSupply.formattedSupply;
+    existingPoint.naraUsdPlusTotalAssets = naraUsdPlusAssets?.rawAssets ?? null;
+    existingPoint.naraUsdPlusTotalAssetsFormatted = naraUsdPlusAssets?.formattedAssets ?? null;
     naraSupplyChartPoints.set(existingPoint.id, existingPoint);
   }
 
