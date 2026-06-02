@@ -220,6 +220,47 @@ async function getNaraUsdTotalSupplyAtBlock(
   return getFormattedSupply(ctx, naraUsdToken, blockHeight);
 }
 
+async function getNaraUsdPlusTotalAssetsAtBlock(
+  ctx: ProcessorContext,
+  blockHeight: number
+): Promise<{ rawAssets: bigint; formattedAssets: BigDecimal } | null> {
+  if (!hasNaraYieldMetrics(ctx.syncedNetwork)) {
+    return null;
+  }
+
+  const naraUsdPlusToken = await getTokenBySymbol(ctx, NARA_USD_PLUS_SYMBOL);
+  if (!naraUsdPlusToken) {
+    ctx.log.warn(`[NARA] Token ${NARA_USD_PLUS_SYMBOL} not found for network=${ctx.syncedNetwork}`);
+    return null;
+  }
+
+  // NaraUSD+ is an ERC-4626 vault over NaraUSD, so totalAssets() returns the
+  // underlying NaraUSD locked. We use the NaraUSD+ token decimals to format —
+  // they match NaraUSD by design, so this also reads naturally in dollars.
+  try {
+    const rawAssets = BigInt(
+      await readContract(
+        ctx,
+        naraUsdPlusToken.address,
+        NaraUSDPlusAbi,
+        'totalAssets',
+        [],
+        blockHeight
+      )
+    );
+    const decimals = Number(naraUsdPlusToken.decimals);
+    const formattedAssets = BigDecimal(rawAssets.toString()).div(
+      BigDecimal((10n ** BigInt(decimals)).toString())
+    );
+    return { rawAssets, formattedAssets };
+  } catch (error) {
+    ctx.log.warn(
+      `[NARA] Failed to read ${NARA_USD_PLUS_SYMBOL}.totalAssets at block=${blockHeight}: ${String(error)}`
+    );
+    return null;
+  }
+}
+
 async function getNaraUsdPlusExchangeRateAtBlock(
   ctx: ProcessorContext,
   blockHeight: number
@@ -814,6 +855,7 @@ export const naraService = {
   getGlobalStats,
   hasNaraYieldMetrics,
   getNaraUsdPlusExchangeRateAtBlock,
+  getNaraUsdPlusTotalAssetsAtBlock,
   getNaraUsdTotalSupplyAtBlock,
   getMetricsAtBlock,
   updateGlobalStats,
