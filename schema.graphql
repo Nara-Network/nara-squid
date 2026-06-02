@@ -53,6 +53,12 @@ type NaraSupplyChartPoint @entity {
   block: BigInt!
   naraUsdSupply: BigInt!
   naraUsdSupplyFormatted: BigDecimal!
+  # NaraUSD locked inside NaraUSD+ (the vault's totalAssets() reading at this
+  # snapshot). Optional because (a) historical points predating this column are
+  # null until backfilled, and (b) networks without yield metrics (e.g. BSC)
+  # don't have a NaraUSD+ deployment.
+  naraUsdPlusTotalAssets: BigInt
+  naraUsdPlusTotalAssetsFormatted: BigDecimal
 }
 
 type NaraTvlChartPoint @entity {
