@@ -27,4 +27,10 @@ export class NaraSupplyChartPoint {
 
     @BigDecimalColumn_({nullable: false})
     naraUsdSupplyFormatted!: BigDecimal
+
+    @BigIntColumn_({nullable: true})
+    naraUsdPlusTotalAssets!: bigint | undefined | null
+
+    @BigDecimalColumn_({nullable: true})
+    naraUsdPlusTotalAssetsFormatted!: BigDecimal | undefined | null
 }
