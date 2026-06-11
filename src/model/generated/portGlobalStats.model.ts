@@ -1,10 +1,9 @@
-import {BigDecimal} from "@subsquid/big-decimal"
-import {Entity as Entity_, Column as Column_, PrimaryColumn as PrimaryColumn_, Index as Index_, BigIntColumn as BigIntColumn_, BigDecimalColumn as BigDecimalColumn_, IntColumn as IntColumn_} from "@subsquid/typeorm-store"
+import {Entity as Entity_, Column as Column_, PrimaryColumn as PrimaryColumn_, Index as Index_, BigIntColumn as BigIntColumn_} from "@subsquid/typeorm-store"
 import {Network} from "./_network"
 
 @Entity_()
-export class NaraGlobalStats {
-    constructor(props?: Partial<NaraGlobalStats>) {
+export class PortGlobalStats {
+    constructor(props?: Partial<PortGlobalStats>) {
         Object.assign(this, props)
     }
 
@@ -16,56 +15,5 @@ export class NaraGlobalStats {
     network!: Network
 
     @BigIntColumn_({nullable: false})
-    naraUsdSupply!: bigint
-
-    @BigDecimalColumn_({nullable: false})
-    naraUsdSupplyFormatted!: BigDecimal
-
-    @IntColumn_({nullable: false})
-    naraUsdDecimals!: number
-
-    @BigIntColumn_({nullable: false})
-    naraUsdPlusVestingAmount!: bigint
-
-    @BigIntColumn_({nullable: false})
-    naraUsdPlusLastDistributionAt!: bigint
-
-    @BigIntColumn_({nullable: false})
-    naraUsdPlusVestingPeriod!: bigint
-
-    @BigDecimalColumn_({nullable: false})
-    reserveFundFormatted!: BigDecimal
-
-    @BigDecimalColumn_({nullable: false})
-    protocolBackingRatio!: BigDecimal
-
-    @BigDecimalColumn_({nullable: false})
-    percentageStaked!: BigDecimal
-
-    @BigDecimalColumn_({nullable: false})
-    investmentAssetsFormatted!: BigDecimal
-
-    @BigDecimalColumn_({nullable: false})
-    cashAndEquivalentsFormatted!: BigDecimal
-
-    @BigDecimalColumn_({nullable: false})
-    totalAssetsFormatted!: BigDecimal
-
-    @BigIntColumn_({nullable: false})
-    apy7d!: bigint
-
-    @BigIntColumn_({nullable: false})
-    apy14d!: bigint
-
-    @BigIntColumn_({nullable: false})
-    apy30d!: bigint
-
-    @BigIntColumn_({nullable: false})
-    weightedApy7d!: bigint
-
-    @IntColumn_({nullable: true})
-    weightedTenorDays!: number | undefined | null
-
-    @BigIntColumn_({nullable: false})
-    updatedAt!: bigint
+    activeUsers!: bigint
 }
