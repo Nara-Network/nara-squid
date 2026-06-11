@@ -69,3 +69,4 @@ export class NaraGlobalStats {
     @BigIntColumn_({nullable: false})
     updatedAt!: bigint
 }
+

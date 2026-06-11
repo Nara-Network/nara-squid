@@ -113,9 +113,6 @@ export async function parseContext(
     `entrance block ${ctx.blocks[0].header.height} and final is ${ctx.blocks[ctx.blocks.length - 1].header.height} | ${ctx.blocks.length} blocks`
   )
 
-  // ============================================================================
-  // GAP DETECTION: Check for missing blocks in batch
-  // ============================================================================
   const batchStartTime = Date.now()
   const sortedBlocks = [...ctx.blocks].sort((a, b) => a.header.height - b.header.height)
   const firstHeight = sortedBlocks[0].header.height
@@ -146,7 +143,6 @@ export async function parseContext(
     )
   }
 
-  // Create BlockBatchAudit entity
   const batchAuditId = `${ctx.syncedNetwork}-${firstHeight}-${batchStartTime}`
   const batchAudit = new BlockBatchAudit({
     id: batchAuditId,
@@ -156,7 +152,7 @@ export async function parseContext(
     count: actualCount,
     expectedCount: expectedCount,
     startedAt: BigInt(batchStartTime),
-    finishedAt: BigInt(0), // Will be set at end of batch
+    finishedAt: BigInt(0), 
   })
 
   let syncedBlock = sortedBlocks[0].header.height
@@ -546,14 +542,17 @@ export async function parseContext(
     naraSupplyChartPoints,
   });
 
+  naraApyChartPoints = await transparencyService.backfillNaraApyChartPoints({
+    ctx,
+    config,
+    naraApyChartPoints,
+  });
+
   naraGlobalStats = await naraService.updateGlobalStats(ctx, config, naraGlobalStats, portVaults, portNavUpdates)
 
-  // await ctx.store.upsert([...currencies.values()])
   await ctx.store.upsert([...users.values()])
   await ctx.store.upsert([...portVaults.values()])
   
-  // Refresh strategy position snapshots daily (use last block in batch)
-  // Must be called AFTER vaults are persisted to avoid foreign key constraint errors
   const lastBlock = ctx.blocks[ctx.blocks.length - 1]
   await strategyService.refreshStrategySnapshotsDaily(ctx, portVaults, config, lastBlock.header.height, lastBlock.header.timestamp)
   await ctx.store.upsert([...expectedExchangeRates.values()])
@@ -582,7 +581,7 @@ export async function parseContext(
   await ctx.store.upsert(portGlobalStats)
   await ctx.store.upsert(naraGlobalStats)
 
-  // Update batch audit finishedAt timestamp
   batchAudit.finishedAt = BigInt(Date.now())
   await ctx.store.upsert(batchAudit)
 }
+
