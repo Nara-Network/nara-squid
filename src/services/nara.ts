@@ -155,6 +155,7 @@ async function getGlobalStats(ctx: ProcessorContext): Promise<NaraGlobalStats> {
     naraUsdSupply: 0n,
     naraUsdSupplyFormatted: BigDecimal(0),
     naraUsdDecimals: 18,
+    naraUsdPlusVestingAmount: 0n,
     reserveFundFormatted: BigDecimal(0),
     protocolBackingRatio: BigDecimal(0),
     percentageStaked: BigDecimal(0),
@@ -537,6 +538,7 @@ async function getMetricsAtBlock(
   naraUsdSupply: bigint;
   naraUsdSupplyFormatted: BigDecimal;
   naraUsdDecimals: number;
+  naraUsdPlusVestingAmount: bigint;
   reserveFundFormatted: BigDecimal;
   protocolBackingRatio: BigDecimal;
   percentageStaked: BigDecimal;
@@ -563,6 +565,7 @@ async function getMetricsAtBlock(
   const naraUsdSupply = naraUsdRawSupply;
   const naraUsdSupplyFormatted = naraUsdRawSupplyFormatted;
   let percentageStaked = BigDecimal(0);
+  let naraUsdPlusVestingAmount = 0n;
 
   if (hasNaraYieldMetrics(ctx.syncedNetwork)) {
     const naraUsdPlusAssetsRaw = BigInt(
@@ -581,12 +584,28 @@ async function getMetricsAtBlock(
     percentageStaked = naraUsdSupply > 0n
       ? naraUsdPlusAssetsFormatted.mul(BigDecimal(100)).div(naraUsdSupplyFormatted)
       : BigDecimal(0);
+
+    // Latest NaraUSD+ vestingAmount() — the rewards currently being streamed into
+    // the vault. Feeds the protocol APR formula in the app. Read failures are left
+    // to propagate (as with totalAssets above) so the batch retries and the prior
+    // persisted value is preserved rather than being overwritten with 0.
+    naraUsdPlusVestingAmount = BigInt(
+      await readContract(
+        ctx,
+        naraUsdPlusToken.address,
+        NaraUSDPlusAbi,
+        'vestingAmount',
+        [],
+        blockHeight
+      )
+    );
   }
 
   return {
     naraUsdSupply,
     naraUsdSupplyFormatted,
     naraUsdDecimals,
+    naraUsdPlusVestingAmount,
     reserveFundFormatted: BigDecimal(0),
     protocolBackingRatio: BigDecimal(0),
     percentageStaked,
@@ -797,6 +816,7 @@ async function updateGlobalStats(
   naraGlobalStats.naraUsdSupply = metrics.naraUsdSupply;
   naraGlobalStats.naraUsdSupplyFormatted = metrics.naraUsdSupplyFormatted;
   naraGlobalStats.naraUsdDecimals = metrics.naraUsdDecimals;
+  naraGlobalStats.naraUsdPlusVestingAmount = metrics.naraUsdPlusVestingAmount;
   naraGlobalStats.percentageStaked = metrics.percentageStaked;
   naraGlobalStats.protocolBackingRatio = hasBackingMetrics && metrics.naraUsdSupply > 0n
     ? metrics.naraUsdSupplyFormatted.add(naraGlobalStats.reserveFundFormatted).div(metrics.naraUsdSupplyFormatted)
