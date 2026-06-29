@@ -11,7 +11,7 @@ import {
 import { naraService } from './nara';
 import { portService } from './port';
 
-const LATEST_APY_REFRESH_INTERVAL_MS = 30 * 60 * 1000;
+const LATEST_APY_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const SUPPLY_BACKFILL_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const LAST_SUPPLY_BACKFILL_AT = new Map<string, number>();
 const LAST_LATEST_SUPPLY_REFRESH_AT = new Map<string, number>();

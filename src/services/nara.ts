@@ -16,7 +16,7 @@ export const START_APY_CALC_DATE = Date.UTC(2026, 2, 19, 0, 0, 0, 0);
 const EXCHANGE_RATE_DECIMALS = 18n;
 const MIN_HOURS_FOR_APR = 1;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const HOUR_MS = 60 * 60 * 1000;
+const WALLET_METRICS_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const ANKR_MULTI_CHAIN_URL = 'https://rpc.ankr.com/multichain';
 
 type AnkrTokenBalance = {
@@ -75,7 +75,7 @@ function getAnkrApiUrl(): string | null {
 }
 
 function getWalletRefreshIntervalMs(isSynced: boolean): number {
-  return isSynced ? HOUR_MS : DAY_MS;
+  return isSynced ? WALLET_METRICS_REFRESH_INTERVAL_MS : DAY_MS;
 }
 
 function getWalletRefreshCacheKey(ctx: ProcessorContext): string {
