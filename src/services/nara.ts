@@ -12,7 +12,12 @@ import { Between, MoreThanOrEqual } from 'typeorm';
 
 const NARA_USD_SYMBOL = 'NaraUSD';
 const NARA_USD_PLUS_SYMBOL = 'NaraUSD+';
-export const START_APY_CALC_DATE = Date.UTC(2026, 2, 19, 0, 0, 0, 0);
+// Previous anchor (kept for reference):
+// export const START_APY_CALC_DATE = Date.UTC(2026, 2, 19, 0, 0, 0, 0);
+// APR statistics now anchor to Ethereum mainnet block 25285744
+// (2026-06-10T08:06:59Z), the first NaraUSD+ reward distribution. Value is the
+// block timestamp in milliseconds, matching Subsquid's ms block timestamps.
+export const START_APY_CALC_DATE = 1781078819000;
 const EXCHANGE_RATE_DECIMALS = 18n;
 const MIN_HOURS_FOR_APR = 1;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -155,6 +160,9 @@ async function getGlobalStats(ctx: ProcessorContext): Promise<NaraGlobalStats> {
     naraUsdSupply: 0n,
     naraUsdSupplyFormatted: BigDecimal(0),
     naraUsdDecimals: 18,
+    naraUsdPlusVestingAmount: 0n,
+    naraUsdPlusLastDistributionAt: 0n,
+    naraUsdPlusVestingPeriod: 0n,
     reserveFundFormatted: BigDecimal(0),
     protocolBackingRatio: BigDecimal(0),
     percentageStaked: BigDecimal(0),
@@ -537,6 +545,9 @@ async function getMetricsAtBlock(
   naraUsdSupply: bigint;
   naraUsdSupplyFormatted: BigDecimal;
   naraUsdDecimals: number;
+  naraUsdPlusVestingAmount: bigint;
+  naraUsdPlusLastDistributionAt: bigint;
+  naraUsdPlusVestingPeriod: bigint;
   reserveFundFormatted: BigDecimal;
   protocolBackingRatio: BigDecimal;
   percentageStaked: BigDecimal;
@@ -563,6 +574,9 @@ async function getMetricsAtBlock(
   const naraUsdSupply = naraUsdRawSupply;
   const naraUsdSupplyFormatted = naraUsdRawSupplyFormatted;
   let percentageStaked = BigDecimal(0);
+  let naraUsdPlusVestingAmount = 0n;
+  let naraUsdPlusLastDistributionAt = 0n;
+  let naraUsdPlusVestingPeriod = 0n;
 
   if (hasNaraYieldMetrics(ctx.syncedNetwork)) {
     const naraUsdPlusAssetsRaw = BigInt(
@@ -581,12 +595,54 @@ async function getMetricsAtBlock(
     percentageStaked = naraUsdSupply > 0n
       ? naraUsdPlusAssetsFormatted.mul(BigDecimal(100)).div(naraUsdSupplyFormatted)
       : BigDecimal(0);
+
+    // Latest NaraUSD+ vestingAmount() — the rewards currently being streamed into
+    // the vault. Feeds the protocol APR formula in the app. Read failures are left
+    // to propagate (as with totalAssets above) so the batch retries and the prior
+    // persisted value is preserved rather than being overwritten with 0.
+    naraUsdPlusVestingAmount = BigInt(
+      await readContract(
+        ctx,
+        naraUsdPlusToken.address,
+        NaraUSDPlusAbi,
+        'vestingAmount',
+        [],
+        blockHeight
+      )
+    );
+
+    // Reward-timing inputs for the app's APR annualizer: the timestamp of the
+    // last reward distribution and the vesting period (both seconds). The app
+    // annualizes by `secondsPerYear / max(now - lastDistribution, vestingPeriod)`.
+    naraUsdPlusLastDistributionAt = BigInt(
+      await readContract(
+        ctx,
+        naraUsdPlusToken.address,
+        NaraUSDPlusAbi,
+        'lastDistributionTimestamp',
+        [],
+        blockHeight
+      )
+    );
+    naraUsdPlusVestingPeriod = BigInt(
+      await readContract(
+        ctx,
+        naraUsdPlusToken.address,
+        NaraUSDPlusAbi,
+        'vestingPeriod',
+        [],
+        blockHeight
+      )
+    );
   }
 
   return {
     naraUsdSupply,
     naraUsdSupplyFormatted,
     naraUsdDecimals,
+    naraUsdPlusVestingAmount,
+    naraUsdPlusLastDistributionAt,
+    naraUsdPlusVestingPeriod,
     reserveFundFormatted: BigDecimal(0),
     protocolBackingRatio: BigDecimal(0),
     percentageStaked,
@@ -797,6 +853,9 @@ async function updateGlobalStats(
   naraGlobalStats.naraUsdSupply = metrics.naraUsdSupply;
   naraGlobalStats.naraUsdSupplyFormatted = metrics.naraUsdSupplyFormatted;
   naraGlobalStats.naraUsdDecimals = metrics.naraUsdDecimals;
+  naraGlobalStats.naraUsdPlusVestingAmount = metrics.naraUsdPlusVestingAmount;
+  naraGlobalStats.naraUsdPlusLastDistributionAt = metrics.naraUsdPlusLastDistributionAt;
+  naraGlobalStats.naraUsdPlusVestingPeriod = metrics.naraUsdPlusVestingPeriod;
   naraGlobalStats.percentageStaked = metrics.percentageStaked;
   naraGlobalStats.protocolBackingRatio = hasBackingMetrics && metrics.naraUsdSupply > 0n
     ? metrics.naraUsdSupplyFormatted.add(naraGlobalStats.reserveFundFormatted).div(metrics.naraUsdSupplyFormatted)

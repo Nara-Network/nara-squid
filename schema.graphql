@@ -32,6 +32,14 @@ type NaraGlobalStats @entity {
   naraUsdSupply: BigInt!
   naraUsdSupplyFormatted: BigDecimal!
   naraUsdDecimals: Int!
+  # Latest NaraUSD+ vestingAmount() read at the head block. Denominated in the
+  # underlying asset (NaraUSD, 18 decimals). Zero on networks without a verified
+  # NaraUSD+ yield interface (e.g. BSC). Feeds the protocol APR shown in the app.
+  naraUsdPlusVestingAmount: BigInt!
+  # Reward-timing inputs for the app APR annualizer (both seconds). Zero on
+  # networks without a NaraUSD+ yield interface (e.g. BSC).
+  naraUsdPlusLastDistributionAt: BigInt!
+  naraUsdPlusVestingPeriod: BigInt!
   reserveFundFormatted: BigDecimal!
   protocolBackingRatio: BigDecimal!
   percentageStaked: BigDecimal!

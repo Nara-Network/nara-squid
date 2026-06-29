@@ -8,14 +8,14 @@
     "Port": {
       "Vaults": [
         {
-          "block": 25173294,
-          "address": "0x42F98100bda60BE988F79cF9c118DD515A2B1dba",
-          "Teller": "0x7cD5eA8CbfeE8EaF43245345e8A7870878e5B5AD",
-          "Accountant": "0x2B8EB9E649CE010BC7Ca2A921540E986285E4834",
-          "AtomicQueue": "0x53F9f24E38dE35E7199250Db24fb13eBb60Cbc2E",
-          "AtomicSolver": "0xdD0094589344F617ABe2bdfF138CcA35Ba2dE0EF",
-          "RolesAuthority": "0xe91C60738DD9b17c4C182c05154bbb323019B769",
-          "Manager": "0xde9fde1ca75904a5FD9c5C3B75cDCCa34D0bAed2"
+          "block": 25425572,
+          "address": "0x15e2579B1F0cBe973889a76826D3a2313b6509c6",
+          "Teller": "0xbaB6dc5196dE8c476B8E343bDa90e8dB1D4510b1",
+          "Accountant": "0xda594876BA13BCC22065E03fFcFB24A22E5c6724",
+          "AtomicQueue": "0xAe1B869c5d0694738B5252641A1DCECE86280f65",
+          "AtomicSolver": "0xC7b13103534D37fD0a7E87e428Bc0c2425c75238",
+          "RolesAuthority": "0xD1283b722cB86a978a4F3ACDc134cAF06Ec10Da0",
+          "Manager": "0x89b4CEE5D299aD9732b10aa9ecbD101b98A3b0bB"
         }
       ]
     }

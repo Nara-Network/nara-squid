@@ -24,6 +24,15 @@ export class NaraGlobalStats {
     @IntColumn_({nullable: false})
     naraUsdDecimals!: number
 
+    @BigIntColumn_({nullable: false})
+    naraUsdPlusVestingAmount!: bigint
+
+    @BigIntColumn_({nullable: false})
+    naraUsdPlusLastDistributionAt!: bigint
+
+    @BigIntColumn_({nullable: false})
+    naraUsdPlusVestingPeriod!: bigint
+
     @BigDecimalColumn_({nullable: false})
     reserveFundFormatted!: BigDecimal
 
@@ -60,3 +69,4 @@ export class NaraGlobalStats {
     @BigIntColumn_({nullable: false})
     updatedAt!: bigint
 }
+

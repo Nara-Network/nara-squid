@@ -8,13 +8,22 @@ import {
   Network,
   PortVault,
 } from '../model';
-import { naraService } from './nara';
+import { naraService, START_APY_CALC_DATE } from './nara';
 import { portService } from './port';
 
 const LATEST_APY_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const SUPPLY_BACKFILL_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+// APR statistics use a 52-week year and annualize by the actual elapsed time
+// between the two exchange-rate reads (timestamps, not a hardcoded 52). Extreme
+// values during very short windows are bounded by the ±1000% clamp below.
+const DAY_MS = 24 * 60 * 60 * 1000;
+const SECONDS_PER_YEAR_52 = 52 * 7 * 24 * 60 * 60;
+const EXCHANGE_RATE_SCALE = 1e18;
+const MAX_APR_BPS = 100000;
 const LAST_SUPPLY_BACKFILL_AT = new Map<string, number>();
 const LAST_LATEST_SUPPLY_REFRESH_AT = new Map<string, number>();
+const LAST_APY_BACKFILL_AT = new Map<string, number>();
 
 type BlockAtTimestamp = {
   height: number;
@@ -104,33 +113,88 @@ async function getBlockAtOrBeforeTimestamp(
   return bestMatch;
 }
 
+// Trailing APR from the NaraUSD+ exchange-rate index. Reads the exchange rate at
+// exactly `windowDays` ago (or the START anchor when `windowDays` is null), then
+// annualizes the realized growth with a 52-week year over the actual elapsed
+// time between the two reads. Re-anchored to block 25285744.
+async function calculateExchangeRateApr(params: {
+  ctx: ProcessorContext;
+  config: Config;
+  erNow: bigint;
+  blockTimestamp: number;
+  windowDays: number | null;
+}): Promise<bigint | null> {
+  const { ctx, config, erNow, blockTimestamp, windowDays } = params;
+
+  if (erNow <= 0n || blockTimestamp <= START_APY_CALC_DATE) {
+    return null;
+  }
+
+  const targetTimestamp =
+    windowDays == null
+      ? START_APY_CALC_DATE
+      : Math.max(blockTimestamp - windowDays * DAY_MS, START_APY_CALC_DATE);
+
+  const pastBlock = await getBlockAtOrBeforeTimestamp(ctx, config.startBlock, targetTimestamp);
+  const erPast = await naraService.getNaraUsdPlusExchangeRateAtBlock(ctx, pastBlock.height);
+  if (erPast == null || erPast <= 0n) {
+    return null;
+  }
+
+  const erNowNum = Number(erNow) / EXCHANGE_RATE_SCALE;
+  const erPastNum = Number(erPast) / EXCHANGE_RATE_SCALE;
+  if (erPastNum <= 0) {
+    return null;
+  }
+
+  const elapsedSeconds = (blockTimestamp - pastBlock.timestamp) / 1000;
+  if (elapsedSeconds <= 0) {
+    return null;
+  }
+
+  const apr = (erNowNum / erPastNum - 1) * (SECONDS_PER_YEAR_52 / elapsedSeconds);
+  const aprBps = Math.round(apr * 10000);
+  const clampedAprBps = Math.min(Math.max(aprBps, -MAX_APR_BPS), MAX_APR_BPS);
+
+  if (!Number.isFinite(clampedAprBps) || Number.isNaN(clampedAprBps)) {
+    return null;
+  }
+
+  return BigInt(clampedAprBps);
+}
+
 async function buildNaraApyChartPoint(params: {
   ctx: ProcessorContext;
+  config: Config;
   blockHeight: number;
   blockTimestamp: number;
   naraApyChartPoints: Map<string, NaraApyChartPoint>;
 }): Promise<NaraApyChartPoint> {
   const {
     ctx,
+    config,
     blockHeight,
     blockTimestamp,
     naraApyChartPoints,
   } = params;
 
+  void naraApyChartPoints;
+
   const snapshotTimestamp = getDayEndTimestamp(blockTimestamp);
   const currentExchangeRate = await naraService.getNaraUsdPlusExchangeRateAtBlock(ctx, blockHeight);
+
+  // Trailing APR from the NaraUSD+ exchange rate: today's rate vs the rate N days
+  // ago. While fewer than N days exist since the anchor (block 25285744), the
+  // lookback clamps to the anchor, so the window grows day by day until the N-day
+  // mark, then becomes a fixed today-vs-N-days-ago comparison (see
+  // calculateExchangeRateApr). `apr` is the since-anchor figure.
   const [apr, apy7d, apy14d, apy30d] = currentExchangeRate == null
-    ? [
-        null as bigint | null,
-        { apr: null as bigint | null },
-        { apr: null as bigint | null },
-        { apr: null as bigint | null },
-      ]
+    ? [null, null, null, null]
     : await Promise.all([
-        naraService.calculateActualAPR(ctx, currentExchangeRate, blockTimestamp, naraApyChartPoints),
-        naraService.calculateRollingAPR(ctx, currentExchangeRate, blockTimestamp, 7, naraApyChartPoints),
-        naraService.calculateRollingAPR(ctx, currentExchangeRate, blockTimestamp, 14, naraApyChartPoints),
-        naraService.calculateRollingAPR(ctx, currentExchangeRate, blockTimestamp, 30, naraApyChartPoints),
+        calculateExchangeRateApr({ ctx, config, erNow: currentExchangeRate, blockTimestamp, windowDays: null }),
+        calculateExchangeRateApr({ ctx, config, erNow: currentExchangeRate, blockTimestamp, windowDays: 7 }),
+        calculateExchangeRateApr({ ctx, config, erNow: currentExchangeRate, blockTimestamp, windowDays: 14 }),
+        calculateExchangeRateApr({ ctx, config, erNow: currentExchangeRate, blockTimestamp, windowDays: 30 }),
       ]);
 
   return new NaraApyChartPoint({
@@ -141,9 +205,9 @@ async function buildNaraApyChartPoint(params: {
     updatedAt: BigInt(blockTimestamp),
     exchangeRate: currentExchangeRate ?? 0n,
     apr: apr ?? 0n,
-    apy7d: apy7d.apr ?? 0n,
-    apy14d: apy14d.apr ?? 0n,
-    apy30d: apy30d.apr ?? 0n,
+    apy7d: apy7d ?? 0n,
+    apy14d: apy14d ?? 0n,
+    apy30d: apy30d ?? 0n,
   });
 }
 
@@ -244,6 +308,7 @@ async function captureDailySnapshotsForBlock(params: {
   if (naraService.hasNaraYieldMetrics(ctx.syncedNetwork)) {
     const apyPoint = await buildNaraApyChartPoint({
       ctx,
+      config,
       blockHeight,
       blockTimestamp,
       naraApyChartPoints,
@@ -388,8 +453,77 @@ async function backfillNaraSupplyChartPoints(params: {
   return naraSupplyChartPoints;
 }
 
+function shouldBackfillNaraApyChartPoints(ctx: ProcessorContext): boolean {
+  if (!ctx.isHead || ctx.blocks.length !== 1) {
+    return false;
+  }
+  if (!naraService.hasNaraYieldMetrics(ctx.syncedNetwork)) {
+    return false;
+  }
+  // Run once per process: this propagates a methodology/anchor change to the
+  // already-stored APR history in place, without a full resync.
+  return (LAST_APY_BACKFILL_AT.get(ctx.syncedNetwork) ?? 0) === 0;
+}
+
+// Recompute apr/apy7d/apy14d/apy30d for every stored NaraApyChartPoint using the
+// current exchange-rate trailing method (re-anchored to block 25285744). Reuses
+// each point's persisted exchange rate as `erNow`; only the historical `erPast`
+// lookback hits the RPC. Pre-anchor points are zeroed without any RPC. Propagates
+// a methodology change to stored history in place, without a full resync.
+async function backfillNaraApyChartPoints(params: {
+  ctx: ProcessorContext;
+  config: Config;
+  naraApyChartPoints: Map<string, NaraApyChartPoint>;
+}): Promise<Map<string, NaraApyChartPoint>> {
+  const { ctx, config, naraApyChartPoints } = params;
+
+  if (!shouldBackfillNaraApyChartPoints(ctx)) {
+    return naraApyChartPoints;
+  }
+
+  const existingPoints = await ctx.store.find(NaraApyChartPoint, {
+    where: { network: ctx.syncedNetwork },
+    order: { timestamp: 'ASC' },
+  });
+
+  for (const point of existingPoints) {
+    const pointBlockTimestamp = Number(point.updatedAt);
+
+    if (pointBlockTimestamp <= START_APY_CALC_DATE) {
+      point.apr = 0n;
+      point.apy7d = 0n;
+      point.apy14d = 0n;
+      point.apy30d = 0n;
+      naraApyChartPoints.set(point.id, point);
+      continue;
+    }
+
+    const erNow = point.exchangeRate;
+    if (erNow <= 0n) {
+      continue;
+    }
+
+    const [apr, apy7d, apy14d, apy30d] = await Promise.all([
+      calculateExchangeRateApr({ ctx, config, erNow, blockTimestamp: pointBlockTimestamp, windowDays: null }),
+      calculateExchangeRateApr({ ctx, config, erNow, blockTimestamp: pointBlockTimestamp, windowDays: 7 }),
+      calculateExchangeRateApr({ ctx, config, erNow, blockTimestamp: pointBlockTimestamp, windowDays: 14 }),
+      calculateExchangeRateApr({ ctx, config, erNow, blockTimestamp: pointBlockTimestamp, windowDays: 30 }),
+    ]);
+
+    point.apr = apr ?? 0n;
+    point.apy7d = apy7d ?? 0n;
+    point.apy14d = apy14d ?? 0n;
+    point.apy30d = apy30d ?? 0n;
+    naraApyChartPoints.set(point.id, point);
+  }
+
+  LAST_APY_BACKFILL_AT.set(ctx.syncedNetwork, ctx.blocks[ctx.blocks.length - 1].header.timestamp);
+  return naraApyChartPoints;
+}
+
 export const transparencyService = {
   backfillNaraSupplyChartPoints,
+  backfillNaraApyChartPoints,
   captureDailySnapshotsForBlock,
   refreshLatestNaraSnapshotsIfDue,
   shouldCaptureDailySnapshot,
