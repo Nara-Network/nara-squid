@@ -15,7 +15,8 @@
           "AtomicQueue": "0xAe1B869c5d0694738B5252641A1DCECE86280f65",
           "AtomicSolver": "0xC7b13103534D37fD0a7E87e428Bc0c2425c75238",
           "RolesAuthority": "0xD1283b722cB86a978a4F3ACDc134cAF06Ec10Da0",
-          "Manager": "0x89b4CEE5D299aD9732b10aa9ecbD101b98A3b0bB"
+          "Manager": "0x89b4CEE5D299aD9732b10aa9ecbD101b98A3b0bB",
+          "StartApyCalculationTimestamp": 1782787567000
         }
       ]
     }
