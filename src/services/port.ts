@@ -17,6 +17,48 @@ let PORT_INITIALIZED_VAULTS = new Map<string, boolean>();
 let LAST_AVG_APY_UPDATE: Date | undefined;
 let AVG_APY_UPDATE_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
 let LAST_APY_CHART_UPDATE: Date | undefined;
+let PRUNED_APY_CHARTS_BEFORE_START = new Set<string>();
+const MIN_APY_CALCULATION_ELAPSED_MS = 60 * 60 * 1000;
+
+function isBeforeApyCalculationStart(timestamp: number, startApyCalculationTimestamp?: number): boolean {
+  return startApyCalculationTimestamp !== undefined && timestamp < startApyCalculationTimestamp;
+}
+
+async function prunePortVaultApyChartsBeforeStart(
+  ctx: ProcessorContext,
+  vault: PortVault,
+  portVaultApyCharts: Map<string, PortVaultApyChart>,
+  startApyCalculationTimestamp?: number
+): Promise<void> {
+  if (startApyCalculationTimestamp === undefined) {
+    return;
+  }
+
+  const pruneKey = `${ctx.syncedNetwork}-${vault.address.toLowerCase()}-${startApyCalculationTimestamp}`;
+  if (PRUNED_APY_CHARTS_BEFORE_START.has(pruneKey)) {
+    return;
+  }
+
+  for (const [chartId, chart] of portVaultApyCharts) {
+    if (chart.vault?.address === vault.address && Number(chart.timestamp) < startApyCalculationTimestamp) {
+      portVaultApyCharts.delete(chartId);
+    }
+  }
+
+  const staleCharts = await ctx.store.find(PortVaultApyChart, {
+    where: {
+      vault: { address: vault.address, network: ctx.syncedNetwork },
+      timestamp: LessThan(BigInt(startApyCalculationTimestamp)),
+    },
+    relations: { vault: true },
+  });
+
+  if (staleCharts.length > 0) {
+    await ctx.store.remove(staleCharts);
+  }
+
+  PRUNED_APY_CHARTS_BEFORE_START.add(pruneKey);
+}
 
 async function getPortVaultByAddress(ctx: ProcessorContext, address: string): Promise<PortVault | null> {
   const portVault = await ctx.store.findOne(PortVault, { where: { address: address.toLowerCase(), network: ctx.syncedNetwork }, relations: { baseToken: true } })
@@ -291,23 +333,30 @@ async function calculateRollingAPR(
   startApyCalculationTimestamp?: number,
   portNavUpdates?: Map<string, PortNavUpdate>
 ): Promise<{ apr: bigint | null; historicalER: bigint }> {
+  const navDecimals = 10n ** 18n;
+  const effectiveStart = startApyCalculationTimestamp ?? Number(vaultStartedAt);
+
+  if (currentTimestamp - effectiveStart < MIN_APY_CALCULATION_ELAPSED_MS) {
+    return { apr: null, historicalER: navDecimals };
+  }
+
   const daysAgoStart = currentTimestamp - (days * 24 * 60 * 60 * 1000);
   const daysAgoDate = new Date(daysAgoStart);
   daysAgoDate.setHours(23, 59, 59, 999);
   const cutoffTimestamp = daysAgoDate.getTime();
 
-  const dbNavUpdates = await ctx.store.find(PortNavUpdate, {
+  const dbNavUpdates = (await ctx.store.find(PortNavUpdate, {
     where: {
       vault: { address: vaultAddress, network: ctx.syncedNetwork },
       timestamp: LessThanOrEqual(BigInt(cutoffTimestamp))
     },
     order: { timestamp: 'DESC' },
     take: 1
-  });
+  })).filter(update => Number(update.timestamp) >= effectiveStart);
 
   const memNavUpdates = portNavUpdates
     ? Array.from(portNavUpdates.values())
-      .filter(update => update.vault.address === vaultAddress && Number(update.timestamp) <= cutoffTimestamp)
+      .filter(update => update.vault.address === vaultAddress && Number(update.timestamp) >= effectiveStart && Number(update.timestamp) <= cutoffTimestamp)
       .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))
       .slice(0, 1)
     : [];
@@ -316,22 +365,54 @@ async function calculateRollingAPR(
     .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))
     .slice(0, 1);
 
-  const navDecimals = 10n ** 18n;
   let erPast: number;
   let historicalER: bigint;
   let annualizationFactor: number;
 
   if (navUpdates.length === 0) {
-    erPast = 1.0;
-    historicalER = navDecimals;
-    // No data at the lookback cutoff — vault is younger than the requested window.
-    // Annualize based on actual elapsed time from inception instead of the full window.
-    const effectiveStart = startApyCalculationTimestamp ?? Number(vaultStartedAt);
-    const actualDaysElapsed = (currentTimestamp - effectiveStart) / (24 * 60 * 60 * 1000);
-    if (actualDaysElapsed < (1 / 24)) { // Less than 1 hour
-      return { apr: null, historicalER };
+    if (startApyCalculationTimestamp !== undefined) {
+      const dbStartNavUpdates = (await ctx.store.find(PortNavUpdate, {
+        where: {
+          vault: { address: vaultAddress, network: ctx.syncedNetwork },
+          timestamp: MoreThanOrEqual(BigInt(effectiveStart))
+        },
+        order: { timestamp: 'ASC' },
+        take: 1
+      })).filter(update => Number(update.timestamp) <= currentTimestamp);
+
+      const memStartNavUpdates = portNavUpdates
+        ? Array.from(portNavUpdates.values())
+          .filter(update => update.vault.address === vaultAddress && Number(update.timestamp) >= effectiveStart && Number(update.timestamp) <= currentTimestamp)
+          .sort((a, b) => Number(a.timestamp) - Number(b.timestamp))
+          .slice(0, 1)
+        : [];
+
+      const startNavUpdate = [...memStartNavUpdates, ...dbStartNavUpdates]
+        .sort((a, b) => Number(a.timestamp) - Number(b.timestamp))
+        .slice(0, 1)[0];
+
+      if (!startNavUpdate || startNavUpdate.newRate === 0n) {
+        return { apr: null, historicalER: navDecimals };
+      }
+
+      erPast = Number(startNavUpdate.newRate) / Number(navDecimals);
+      historicalER = startNavUpdate.newRate;
+      const actualDaysElapsed = (currentTimestamp - Number(startNavUpdate.timestamp)) / (24 * 60 * 60 * 1000);
+      if (actualDaysElapsed < (1 / 24)) { // Less than 1 hour
+        return { apr: null, historicalER };
+      }
+      annualizationFactor = 365 / actualDaysElapsed;
+    } else {
+      erPast = 1.0;
+      historicalER = navDecimals;
+      // No data at the lookback cutoff — vault is younger than the requested window.
+      // Annualize based on actual elapsed time from inception instead of the full window.
+      const actualDaysElapsed = (currentTimestamp - effectiveStart) / (24 * 60 * 60 * 1000);
+      if (actualDaysElapsed < (1 / 24)) { // Less than 1 hour
+        return { apr: null, historicalER };
+      }
+      annualizationFactor = 365 / actualDaysElapsed;
     }
-    annualizationFactor = 365 / actualDaysElapsed;
   } else {
     const historicalNavUpdate = navUpdates[0];
     const historicalExchangeRate = historicalNavUpdate.newRate;
@@ -418,6 +499,17 @@ async function getOrCreateDailyChartEntry(
   const currentDayEnd = currentDate.getTime();
   const currentDayStart = currentDayEnd - (24 * 60 * 60 * 1000) + 1;
 
+  await prunePortVaultApyChartsBeforeStart(
+    ctx,
+    vault,
+    portVaultApyCharts,
+    startApyCalculationTimestamp
+  );
+
+  if (isBeforeApyCalculationStart(currentTimestamp, startApyCalculationTimestamp)) {
+    return null;
+  }
+
   // Backfill missing days between last entry and current day (during historical sync)
   const recentCharts = await ctx.store.find(PortVaultApyChart, {
     where: {
@@ -445,6 +537,11 @@ async function getOrCreateDailyChartEntry(
       let dayToBackfill = lastDayEnd + (24 * 60 * 60 * 1000); // Start from day after last entry
       
       while (dayToBackfill < currentDayEnd) {
+        if (isBeforeApyCalculationStart(dayToBackfill, startApyCalculationTimestamp)) {
+          dayToBackfill += (24 * 60 * 60 * 1000);
+          continue;
+        }
+
         const dayStart = dayToBackfill - (24 * 60 * 60 * 1000) + 1;
         
         // Check if we already have an entry for this day
@@ -477,6 +574,11 @@ async function getOrCreateDailyChartEntry(
 
           if (navForDay.length > 0) {
             const navUpdate = navForDay[0];
+            if (isBeforeApyCalculationStart(Number(navUpdate.timestamp), startApyCalculationTimestamp)) {
+              dayToBackfill += (24 * 60 * 60 * 1000);
+              continue;
+            }
+
             const exchangeRateForDay = navUpdate.newRate;
             // Use the NAV that was valid at the end of this day for calculation
             const { result7d, result14d, result30d, result365d, hasAnyApr } =
@@ -735,6 +837,17 @@ async function updateAllVaultApyCharts(
         continue;
       }
 
+      const startApyCalculationTimestamp = config.Port?.Vaults?.find((v) => v.address.toLowerCase() == portVault.address.toLowerCase())?.StartApyCalculationTimestamp;
+      await prunePortVaultApyChartsBeforeStart(
+        ctx,
+        portVault,
+        portVaultApyCharts,
+        startApyCalculationTimestamp
+      );
+      if (isBeforeApyCalculationStart(yesterdayEnd, startApyCalculationTimestamp)) {
+        continue;
+      }
+
       // Check if yesterday already has a chart entry (from NAV updates)
       const yesterdayDayStart = yesterdayEnd - (24 * 60 * 60 * 1000) + 1;
       const memEntryYesterday = Array.from(portVaultApyCharts.values()).find(
@@ -777,12 +890,15 @@ async function updateAllVaultApyCharts(
       }
 
       const navUpdate = navBeforeYesterday[0];
+      if (isBeforeApyCalculationStart(Number(navUpdate.timestamp), startApyCalculationTimestamp)) {
+        continue;
+      }
+
       // Use current NAV from vault entity as the exchange rate for yesterday
       const exchangeRateForYesterday = portVault.currentNav;
 
       // Use current NAV for APR calculation
       // This calculates APR as of yesterday by comparing current rate to 7/14/30/365 days before yesterday
-      const startApyCalculationTimestamp = config.Port?.Vaults?.find((v) => v.address.toLowerCase() == portVault.address.toLowerCase())?.StartApyCalculationTimestamp;
       const { result7d, result14d, result30d, result365d, hasAnyApr } =
         await calculateRollingAprSeries(
           ctx,
