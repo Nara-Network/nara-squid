@@ -335,6 +335,7 @@ async function calculateRollingAPR(
 ): Promise<{ apr: bigint | null; historicalER: bigint }> {
   const navDecimals = 10n ** 18n;
   const effectiveStart = startApyCalculationTimestamp ?? Number(vaultStartedAt);
+  const vaultAddressLower = vaultAddress.toLowerCase();
 
   if (currentTimestamp - effectiveStart < MIN_APY_CALCULATION_ELAPSED_MS) {
     return { apr: null, historicalER: navDecimals };
@@ -356,7 +357,7 @@ async function calculateRollingAPR(
 
   const memNavUpdates = portNavUpdates
     ? Array.from(portNavUpdates.values())
-      .filter(update => update.vault.address === vaultAddress && Number(update.timestamp) >= effectiveStart && Number(update.timestamp) <= cutoffTimestamp)
+      .filter(update => update.vault.address.toLowerCase() === vaultAddressLower && Number(update.timestamp) >= effectiveStart && Number(update.timestamp) <= cutoffTimestamp)
       .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))
       .slice(0, 1)
     : [];
@@ -371,37 +372,64 @@ async function calculateRollingAPR(
 
   if (navUpdates.length === 0) {
     if (startApyCalculationTimestamp !== undefined) {
-      const dbStartNavUpdates = (await ctx.store.find(PortNavUpdate, {
-        where: {
-          vault: { address: vaultAddress, network: ctx.syncedNetwork },
-          timestamp: MoreThanOrEqual(BigInt(effectiveStart))
-        },
-        order: { timestamp: 'ASC' },
-        take: 1
-      })).filter(update => Number(update.timestamp) <= currentTimestamp);
-
-      const memStartNavUpdates = portNavUpdates
-        ? Array.from(portNavUpdates.values())
-          .filter(update => update.vault.address === vaultAddress && Number(update.timestamp) >= effectiveStart && Number(update.timestamp) <= currentTimestamp)
-          .sort((a, b) => Number(a.timestamp) - Number(b.timestamp))
-          .slice(0, 1)
-        : [];
-
-      const startNavUpdate = [...memStartNavUpdates, ...dbStartNavUpdates]
-        .sort((a, b) => Number(a.timestamp) - Number(b.timestamp))
-        .slice(0, 1)[0];
-
-      if (!startNavUpdate || startNavUpdate.newRate === 0n) {
+      const actualDaysElapsed = (currentTimestamp - effectiveStart) / (24 * 60 * 60 * 1000);
+      if (actualDaysElapsed < (1 / 24)) { // Less than 1 hour
         return { apr: null, historicalER: navDecimals };
       }
 
-      erPast = Number(startNavUpdate.newRate) / Number(navDecimals);
-      historicalER = startNavUpdate.newRate;
-      const actualDaysElapsed = (currentTimestamp - Number(startNavUpdate.timestamp)) / (24 * 60 * 60 * 1000);
-      if (actualDaysElapsed < (1 / 24)) { // Less than 1 hour
-        return { apr: null, historicalER };
+      const dbBaselineNavUpdates = await ctx.store.find(PortNavUpdate, {
+        where: {
+          vault: { address: vaultAddress, network: ctx.syncedNetwork },
+          timestamp: LessThanOrEqual(BigInt(effectiveStart))
+        },
+        order: { timestamp: 'DESC' },
+        take: 1
+      });
+
+      const memBaselineNavUpdates = portNavUpdates
+        ? Array.from(portNavUpdates.values())
+          .filter(update => update.vault.address.toLowerCase() === vaultAddressLower && Number(update.timestamp) <= effectiveStart)
+          .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))
+          .slice(0, 1)
+        : [];
+
+      const baselineNavUpdate = [...memBaselineNavUpdates, ...dbBaselineNavUpdates]
+        .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))
+        .slice(0, 1)[0];
+
+      if (baselineNavUpdate && baselineNavUpdate.newRate !== 0n) {
+        erPast = Number(baselineNavUpdate.newRate) / Number(navDecimals);
+        historicalER = baselineNavUpdate.newRate;
+        annualizationFactor = 365 / actualDaysElapsed;
+      } else {
+        const dbStartNavUpdates = (await ctx.store.find(PortNavUpdate, {
+          where: {
+            vault: { address: vaultAddress, network: ctx.syncedNetwork },
+            timestamp: MoreThanOrEqual(BigInt(effectiveStart))
+          },
+          order: { timestamp: 'ASC' },
+          take: 1
+        })).filter(update => Number(update.timestamp) <= currentTimestamp);
+
+        const memStartNavUpdates = portNavUpdates
+          ? Array.from(portNavUpdates.values())
+            .filter(update => update.vault.address.toLowerCase() === vaultAddressLower && Number(update.timestamp) >= effectiveStart && Number(update.timestamp) <= currentTimestamp)
+            .sort((a, b) => Number(a.timestamp) - Number(b.timestamp))
+            .slice(0, 1)
+          : [];
+
+        const startNavUpdate = [...memStartNavUpdates, ...dbStartNavUpdates]
+          .sort((a, b) => Number(a.timestamp) - Number(b.timestamp))
+          .slice(0, 1)[0];
+
+        if (!startNavUpdate || startNavUpdate.oldRate === 0n) {
+          return { apr: null, historicalER: navDecimals };
+        }
+
+        erPast = Number(startNavUpdate.oldRate) / Number(navDecimals);
+        historicalER = startNavUpdate.oldRate;
+        annualizationFactor = 365 / actualDaysElapsed;
       }
-      annualizationFactor = 365 / actualDaysElapsed;
     } else {
       erPast = 1.0;
       historicalER = navDecimals;
