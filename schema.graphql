@@ -34,7 +34,7 @@ type NaraGlobalStats @entity {
   naraUsdDecimals: Int!
   # Latest NaraUSD+ vestingAmount() read at the head block. Denominated in the
   # underlying asset (NaraUSD, 18 decimals). Zero on networks without a verified
-  # NaraUSD+ yield interface (e.g. BSC). Feeds the protocol APR shown in the app.
+  # NaraUSD+ yield interface (e.g. BSC). Feeds the APR snapshot calculation.
   naraUsdPlusVestingAmount: BigInt!
   # Reward-timing inputs for the app APR annualizer (both seconds). Zero on
   # networks without a NaraUSD+ yield interface (e.g. BSC).
@@ -84,7 +84,14 @@ type NaraApyChartPoint @entity {
   timestamp: BigInt! @index
   block: BigInt!
   updatedAt: BigInt!
+  # Deprecated compatibility field. Nara APR chart values are derived from the
+  # vesting distribution snapshot below, not from NaraUSD+ exchange-rate deltas.
   exchangeRate: BigInt!
+  naraUsdSupply: BigInt!
+  naraUsdPlusTotalAssets: BigInt!
+  naraUsdPlusVestingAmount: BigInt!
+  naraUsdPlusLastDistributionAt: BigInt!
+  naraUsdPlusVestingPeriod: BigInt!
   apr: BigInt!
   apy7d: BigInt!
   apy14d: BigInt!

@@ -15,6 +15,7 @@ import {
   FundsDiverted,
   ExpectedExchangeRate,
   ExpectedExchangeRateSnapshot,
+  PortGlobalStats,
   ManagerWithdraw,
   ManagerDeposit,
   BorrowedAssetBalance,
@@ -55,7 +56,7 @@ function getActiveVaults(config: Config, blockHeight: number) {
 }
 
 function shouldIncludeAllBlocks(): boolean {
-  return process.env.INCLUDE_ALL_BLOCKS !== 'false';
+  return process.env.INCLUDE_ALL_BLOCKS === 'true';
 }
 
 export async function parseContext(
@@ -75,7 +76,7 @@ export async function parseContext(
   let portVaultActivities: Map<string, PortVaultActivity> = new Map()
   let portVaultStatusUpdates: Map<string, PortVaultStatusUpdate> = new Map()
   let portNavUpdates: Map<string, PortNavUpdate> = new Map()
-  let portGlobalStats = await portService.getGlobalStats(ctx)
+  let portGlobalStats: PortGlobalStats | undefined
   let portVaultTransactionHistories: Map<string, PortVaultTransactionHistory> = new Map()
   let portVaultAPYs: Map<string, PortVaultAPY> = new Map()
   let portVaultApyCharts: Map<string, PortVaultApyChart> = new Map()
@@ -86,7 +87,8 @@ export async function parseContext(
   let managerDeposits: Map<string, ManagerDeposit> = new Map()
   let borrowedBalances: Map<string, BorrowedAssetBalance> = new Map()
   let snapshots: Map<string, ExpectedExchangeRateSnapshot> = new Map()
-  let naraGlobalStats: NaraGlobalStats = await naraService.getGlobalStats(ctx)
+  let naraGlobalStats: NaraGlobalStats | undefined
+  let shouldUpsertNaraGlobalStats = false
   let naraSupplyChartPoints: Map<string, NaraSupplyChartPoint> = new Map()
   let naraTvlChartPoints: Map<string, NaraTvlChartPoint> = new Map()
   let naraApyChartPoints: Map<string, NaraApyChartPoint> = new Map()
@@ -109,19 +111,19 @@ export async function parseContext(
     ctx.log.info(`******* CHAIN SYNCED *******`)
   }
 
-  ctx.log.info(
-    `entrance block ${ctx.blocks[0].header.height} and final is ${ctx.blocks[ctx.blocks.length - 1].header.height} | ${ctx.blocks.length} blocks`
-  )
-
   const batchStartTime = Date.now()
   const sortedBlocks = [...ctx.blocks].sort((a, b) => a.header.height - b.header.height)
   const firstHeight = sortedBlocks[0].header.height
   const lastHeight = sortedBlocks[sortedBlocks.length - 1].header.height
   const actualCount = sortedBlocks.length
   const includeAllBlocks = shouldIncludeAllBlocks()
-  const expectedCount = includeAllBlocks ? lastHeight - firstHeight + 1 : actualCount
+  let batchAudit: BlockBatchAudit | undefined
 
   if (includeAllBlocks) {
+    ctx.log.info(
+      `entrance block ${firstHeight} and final is ${lastHeight} | ${actualCount} blocks`
+    )
+
     for (let i = 1; i < sortedBlocks.length; i++) {
       const prevHeight = sortedBlocks[i - 1].header.height
       const currHeight = sortedBlocks[i].header.height
@@ -137,23 +139,20 @@ export async function parseContext(
         }
       }
     }
-  } else {
-    ctx.log.info(
-      `FILTERED_BATCH_BLOCKS first=${firstHeight} last=${lastHeight} delivered=${actualCount}`
-    )
-  }
 
-  const batchAuditId = `${ctx.syncedNetwork}-${firstHeight}-${batchStartTime}`
-  const batchAudit = new BlockBatchAudit({
-    id: batchAuditId,
-    network: ctx.syncedNetwork,
-    firstHeight: BigInt(firstHeight),
-    lastHeight: BigInt(lastHeight),
-    count: actualCount,
-    expectedCount: expectedCount,
-    startedAt: BigInt(batchStartTime),
-    finishedAt: BigInt(0), 
-  })
+    const expectedCount = lastHeight - firstHeight + 1
+    const batchAuditId = `${ctx.syncedNetwork}-${firstHeight}-${batchStartTime}`
+    batchAudit = new BlockBatchAudit({
+      id: batchAuditId,
+      network: ctx.syncedNetwork,
+      firstHeight: BigInt(firstHeight),
+      lastHeight: BigInt(lastHeight),
+      count: actualCount,
+      expectedCount,
+      startedAt: BigInt(batchStartTime),
+      finishedAt: BigInt(0),
+    })
+  }
 
   let syncedBlock = sortedBlocks[0].header.height
 
@@ -176,6 +175,7 @@ export async function parseContext(
       if (activeVaults.some((vault) => vault.address.toLowerCase() == log.address)) {
         switch (log.topics[0]) {
           case BoringVaultAbi.events.Enter.topic: {
+            portGlobalStats = portGlobalStats ?? await portService.getGlobalStats(ctx)
             ; ({ portDeposits, users, portVaults, portGlobalStats, portVaultTransactionHistories } =
               await parserService.parseVaultEnter(
                 ctx,
@@ -214,7 +214,6 @@ export async function parseContext(
               portVaults,
               portRequestFulfilleds,
               portVaultTransactionHistories,
-              portGlobalStats,
             } = await parserService.parseAtomicRequestFulfilled(
               ctx,
               log,
@@ -224,7 +223,6 @@ export async function parseContext(
               users,
               portVaults,
               portVaultTransactionHistories,
-              portGlobalStats,
             ))
             break
           }
@@ -487,7 +485,11 @@ export async function parseContext(
       block.header.timestamp,
     ))
 
-    if (!ctx.isHead && transparencyService.shouldCaptureDailySnapshot(block.header.timestamp, nextBlock?.header.timestamp)) {
+    if (
+      includeAllBlocks &&
+      !ctx.isHead &&
+      transparencyService.shouldCaptureDailySnapshot(block.header.timestamp, nextBlock?.header.timestamp)
+    ) {
       ; ({
         naraSupplyChartPoints,
         naraTvlChartPoints,
@@ -524,6 +526,23 @@ export async function parseContext(
     syncedBlock += syncedBlocksInterval
   }
 
+  if (!includeAllBlocks) {
+    const lastBlock = sortedBlocks[sortedBlocks.length - 1]
+    ; ({
+      naraSupplyChartPoints,
+      naraTvlChartPoints,
+      naraApyChartPoints,
+    } = await transparencyService.backfillMissingDailySnapshots({
+      ctx,
+      config,
+      blockTimestamp: lastBlock.header.timestamp,
+      portVaults,
+      naraSupplyChartPoints,
+      naraTvlChartPoints,
+      naraApyChartPoints,
+    }))
+  }
+
   ({ portWithdrawalRequests, portVaults } = await portService.updateExpiredWithdrawalRequests(
     ctx,
     portWithdrawalRequests,
@@ -548,7 +567,19 @@ export async function parseContext(
     naraApyChartPoints,
   });
 
-  naraGlobalStats = await naraService.updateGlobalStats(ctx, config, naraGlobalStats, portVaults, portNavUpdates)
+  if (naraService.shouldUpdateGlobalStats(ctx, config)) {
+    naraGlobalStats = await naraService.getGlobalStats(ctx)
+    const naraGlobalStatsUpdatedAtBefore = naraGlobalStats.updatedAt
+    naraGlobalStats = await naraService.updateGlobalStats(
+      ctx,
+      config,
+      naraGlobalStats,
+      portVaults,
+      portNavUpdates,
+      naraApyChartPoints
+    )
+    shouldUpsertNaraGlobalStats = naraGlobalStats.updatedAt !== naraGlobalStatsUpdatedAtBefore
+  }
 
   await ctx.store.upsert([...users.values()])
   await ctx.store.upsert([...portVaults.values()])
@@ -578,10 +609,15 @@ export async function parseContext(
   await ctx.store.upsert([...naraRedemptionActivities.values()])
   await ctx.store.upsert([...totalRequestedAmounts.values()])
 
-  await ctx.store.upsert(portGlobalStats)
-  await ctx.store.upsert(naraGlobalStats)
+  if (portGlobalStats) {
+    await ctx.store.upsert(portGlobalStats)
+  }
+  if (naraGlobalStats && shouldUpsertNaraGlobalStats) {
+    await ctx.store.upsert(naraGlobalStats)
+  }
 
-  batchAudit.finishedAt = BigInt(Date.now())
-  await ctx.store.upsert(batchAudit)
+  if (batchAudit) {
+    batchAudit.finishedAt = BigInt(Date.now())
+    await ctx.store.upsert(batchAudit)
+  }
 }
-

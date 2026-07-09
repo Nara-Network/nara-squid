@@ -8,7 +8,6 @@ import { Config } from '../common/types';
 import { convertToBaseTokenAmount, normalizeDecimals, readContract } from '../helpers/common';
 import { NaraApyChartPoint, NaraGlobalStats, Network, PortNavUpdate, PortVault, PortVaultType, Token } from '../model';
 import { portService } from './port';
-import { Between, MoreThanOrEqual } from 'typeorm';
 
 const NARA_USD_SYMBOL = 'NaraUSD';
 const NARA_USD_PLUS_SYMBOL = 'NaraUSD+';
@@ -18,9 +17,9 @@ const NARA_USD_PLUS_SYMBOL = 'NaraUSD+';
 // (2026-06-10T08:06:59Z), the first NaraUSD+ reward distribution. Value is the
 // block timestamp in milliseconds, matching Subsquid's ms block timestamps.
 export const START_APY_CALC_DATE = 1781078819000;
-const EXCHANGE_RATE_DECIMALS = 18n;
-const MIN_HOURS_FOR_APR = 1;
 const DAY_MS = 24 * 60 * 60 * 1000;
+const SECONDS_PER_YEAR_52 = 52 * 7 * 24 * 60 * 60;
+const MAX_APR_BPS = 100000;
 const WALLET_METRICS_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const ANKR_MULTI_CHAIN_URL = 'https://rpc.ankr.com/multichain';
 
@@ -38,16 +37,6 @@ type AnkrAccountBalanceResponse = {
 
 const LAST_WALLET_BALANCE_REFRESH_AT = new Map<string, number>();
 
-function getDayEndTimestamp(timestampMs: number): number {
-  const date = new Date(timestampMs);
-  date.setUTCHours(23, 59, 59, 999);
-  return date.getTime();
-}
-
-function getFirstEligibleApyTimestamp(days: number): number {
-  return getDayEndTimestamp(START_APY_CALC_DATE + ((days - 1) * DAY_MS));
-}
-
 function getAnkrBlockchain(network: Network): string[] | null {
   switch (network) {
     case Network.ETHEREUM:
@@ -63,6 +52,80 @@ function hasNaraYieldMetrics(network: Network): boolean {
 
 function hasHubBackingMetrics(config: Config): boolean {
   return config.Nara != null;
+}
+
+function calculateVestingDistributionApr(params: {
+  naraUsdSupply: bigint;
+  naraUsdPlusTotalAssets: bigint;
+  naraUsdPlusVestingAmount: bigint;
+  naraUsdPlusLastDistributionAt: bigint;
+  naraUsdPlusVestingPeriod: bigint;
+  blockTimestamp: number;
+}): bigint | null {
+  const {
+    naraUsdSupply,
+    naraUsdPlusTotalAssets,
+    naraUsdPlusVestingAmount,
+    naraUsdPlusLastDistributionAt,
+    naraUsdPlusVestingPeriod,
+    blockTimestamp,
+  } = params;
+
+  if (
+    naraUsdSupply <= 0n ||
+    naraUsdPlusTotalAssets <= 0n ||
+    naraUsdPlusLastDistributionAt <= 0n ||
+    naraUsdPlusVestingPeriod <= 0n
+  ) {
+    return null;
+  }
+
+  if (naraUsdPlusVestingAmount === 0n) {
+    return 0n;
+  }
+
+  const earningSupply = naraUsdSupply - naraUsdPlusVestingAmount;
+  if (earningSupply <= 0n) {
+    return null;
+  }
+
+  const supply = Number(naraUsdSupply);
+  const totalAssets = Number(naraUsdPlusTotalAssets);
+  const vesting = Number(naraUsdPlusVestingAmount);
+  const earning = Number(earningSupply);
+  const stakingRatio = totalAssets / supply;
+
+  if (
+    !Number.isFinite(supply) ||
+    !Number.isFinite(totalAssets) ||
+    !Number.isFinite(vesting) ||
+    !Number.isFinite(earning) ||
+    !Number.isFinite(stakingRatio) ||
+    stakingRatio <= 0
+  ) {
+    return null;
+  }
+
+  const nowSeconds = Math.floor(blockTimestamp / 1000);
+  const elapsedSinceDistribution = nowSeconds - Number(naraUsdPlusLastDistributionAt);
+  const annualizationSeconds = Math.max(
+    elapsedSinceDistribution,
+    Number(naraUsdPlusVestingPeriod)
+  );
+  if (!Number.isFinite(annualizationSeconds) || annualizationSeconds <= 0) {
+    return null;
+  }
+
+  const annualizationFactor = SECONDS_PER_YEAR_52 / annualizationSeconds;
+  const aprFraction = ((vesting / earning) * annualizationFactor) / stakingRatio;
+  const aprBps = Math.round(aprFraction * 10000);
+  const clampedAprBps = Math.min(Math.max(aprBps, -MAX_APR_BPS), MAX_APR_BPS);
+
+  if (!Number.isFinite(clampedAprBps) || Number.isNaN(clampedAprBps)) {
+    return null;
+  }
+
+  return BigInt(clampedAprBps);
 }
 
 function getAnkrApiUrl(): string | null {
@@ -99,6 +162,12 @@ function shouldRefreshWalletMetrics(ctx: ProcessorContext): boolean {
   }
 
   return nowTs - lastRefreshAt >= intervalMs;
+}
+
+function shouldUpdateGlobalStats(ctx: ProcessorContext, config: Config): boolean {
+  const isSynced = ctx.isHead && ctx.blocks.length === 1;
+  const hasBackingMetrics = hasHubBackingMetrics(config);
+  return isSynced || (hasBackingMetrics && shouldRefreshWalletMetrics(ctx));
 }
 
 async function getAccountBalanceUsd(
@@ -269,10 +338,18 @@ async function getNaraUsdPlusTotalAssetsAtBlock(
   }
 }
 
-async function getNaraUsdPlusExchangeRateAtBlock(
+async function getNaraUsdPlusVestingDistributionAtBlock(
   ctx: ProcessorContext,
   blockHeight: number
-): Promise<bigint | null> {
+): Promise<{
+  vestingAmount: bigint;
+  lastDistributionAt: bigint;
+  vestingPeriod: bigint;
+} | null> {
+  if (!hasNaraYieldMetrics(ctx.syncedNetwork)) {
+    return null;
+  }
+
   const naraUsdPlusToken = await getTokenBySymbol(ctx, NARA_USD_PLUS_SYMBOL);
   if (!naraUsdPlusToken) {
     ctx.log.warn(`[NARA] Token ${NARA_USD_PLUS_SYMBOL} not found for network=${ctx.syncedNetwork}`);
@@ -280,191 +357,44 @@ async function getNaraUsdPlusExchangeRateAtBlock(
   }
 
   try {
-    const oneShareRaw = 10n ** BigInt(naraUsdPlusToken.decimals);
-    return BigInt(
-      await readContract(
+    const [vestingAmount, lastDistributionAt, vestingPeriod] = await Promise.all([
+      readContract(
         ctx,
         naraUsdPlusToken.address,
         NaraUSDPlusAbi,
-        'previewMint',
-        { shares: oneShareRaw },
+        'vestingAmount',
+        [],
         blockHeight
-      )
-    );
+      ),
+      readContract(
+        ctx,
+        naraUsdPlusToken.address,
+        NaraUSDPlusAbi,
+        'lastDistributionTimestamp',
+        [],
+        blockHeight
+      ),
+      readContract(
+        ctx,
+        naraUsdPlusToken.address,
+        NaraUSDPlusAbi,
+        'vestingPeriod',
+        [],
+        blockHeight
+      ),
+    ]);
+
+    return {
+      vestingAmount: BigInt(vestingAmount),
+      lastDistributionAt: BigInt(lastDistributionAt),
+      vestingPeriod: BigInt(vestingPeriod),
+    };
   } catch (error) {
     ctx.log.warn(
-      `[NARA] Failed to read ${NARA_USD_PLUS_SYMBOL}.previewMint at block=${blockHeight}: ${String(error)}`
+      `[NARA] Failed to read ${NARA_USD_PLUS_SYMBOL} vesting distribution at block=${blockHeight}: ${String(error)}`
     );
     return null;
   }
-}
-
-async function getNaraApyReferencePoints(
-  ctx: ProcessorContext,
-  cutoffTimestamp: number,
-  naraApyChartPoints?: Map<string, NaraApyChartPoint>
-): Promise<{
-  historicalPoint: NaraApyChartPoint | null;
-  earliestPoint: NaraApyChartPoint | null;
-}> {
-  const effectiveCutoffTimestamp = Math.max(cutoffTimestamp, START_APY_CALC_DATE);
-  const [dbHistoricalPoint, dbEarliestPoint] = await Promise.all([
-    ctx.store.find(NaraApyChartPoint, {
-      where: {
-        network: ctx.syncedNetwork,
-        timestamp: Between(BigInt(START_APY_CALC_DATE), BigInt(effectiveCutoffTimestamp)),
-      },
-      order: { timestamp: 'DESC' },
-      take: 1,
-    }),
-    ctx.store.find(NaraApyChartPoint, {
-      where: {
-        network: ctx.syncedNetwork,
-        timestamp: MoreThanOrEqual(BigInt(START_APY_CALC_DATE)),
-      },
-      order: { timestamp: 'ASC' },
-      take: 1,
-    }),
-  ]);
-
-  const memPoints = naraApyChartPoints
-    ? Array.from(naraApyChartPoints.values()).filter(
-        (point) => point.network === ctx.syncedNetwork && Number(point.timestamp) >= START_APY_CALC_DATE
-      )
-    : [];
-
-  const memHistoricalPoint = memPoints
-    .filter((point) => Number(point.timestamp) <= effectiveCutoffTimestamp)
-    .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))[0] ?? null;
-  const memEarliestPoint = memPoints
-    .sort((a, b) => Number(a.timestamp) - Number(b.timestamp))[0] ?? null;
-
-  const historicalPoint = [dbHistoricalPoint[0] ?? null, memHistoricalPoint]
-    .filter((point): point is NaraApyChartPoint => point !== null)
-    .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))[0] ?? null;
-  const earliestPoint = [dbEarliestPoint[0] ?? null, memEarliestPoint]
-    .filter((point): point is NaraApyChartPoint => point !== null)
-    .sort((a, b) => Number(a.timestamp) - Number(b.timestamp))[0] ?? null;
-
-  return { historicalPoint, earliestPoint };
-}
-
-async function calculateRollingAPR(
-  ctx: ProcessorContext,
-  currentExchangeRate: bigint,
-  currentTimestamp: number,
-  days: number,
-  naraApyChartPoints?: Map<string, NaraApyChartPoint>
-): Promise<{ apr: bigint | null; historicalER: bigint }> {
-  if (getDayEndTimestamp(currentTimestamp) < getFirstEligibleApyTimestamp(days)) {
-    return { apr: null, historicalER: 10n ** EXCHANGE_RATE_DECIMALS };
-  }
-
-  const daysAgoStart = currentTimestamp - (days * 24 * 60 * 60 * 1000);
-  const daysAgoDate = new Date(daysAgoStart);
-  daysAgoDate.setHours(23, 59, 59, 999);
-  const cutoffTimestamp = daysAgoDate.getTime();
-
-  const { historicalPoint } = await getNaraApyReferencePoints(
-    ctx,
-    cutoffTimestamp,
-    naraApyChartPoints
-  );
-
-  let historicalER = 10n ** EXCHANGE_RATE_DECIMALS;
-  let annualizationFactor: number;
-
-  if (cutoffTimestamp < START_APY_CALC_DATE) {
-    const elapsedDays = Math.max(
-      (currentTimestamp - START_APY_CALC_DATE) / DAY_MS,
-      MIN_HOURS_FOR_APR / 24
-    );
-    annualizationFactor = 365 / elapsedDays;
-  } else if (historicalPoint) {
-    const historicalExchangeRate = await getNaraUsdPlusExchangeRateAtBlock(
-      ctx,
-      Number(historicalPoint.block)
-    );
-
-    if (historicalExchangeRate == null || historicalExchangeRate === 0n) {
-      ctx.log.warn(
-        `[NARA Rolling APR] Invalid historical exchange rate for network=${ctx.syncedNetwork} block=${historicalPoint.block}, using 1.0`
-      );
-    } else {
-      historicalER = historicalExchangeRate;
-    }
-
-    annualizationFactor = Math.round(365 / days);
-  } else {
-    annualizationFactor = Math.round(365 / days);
-  }
-
-  if (currentExchangeRate === 0n) {
-    ctx.log.warn(`[NARA Rolling APR] Invalid current exchange rate (0) for network=${ctx.syncedNetwork}`);
-    return { apr: null, historicalER };
-  }
-
-  const erPast = Number(historicalER) / Number(10n ** EXCHANGE_RATE_DECIMALS);
-  if (erPast === 0) {
-    ctx.log.warn(`[NARA Rolling APR] Invalid past exchange rate (0) for network=${ctx.syncedNetwork}`);
-    return { apr: null, historicalER };
-  }
-
-  const erCurrent = Number(currentExchangeRate) / Number(10n ** EXCHANGE_RATE_DECIMALS);
-  const exchangeRateReturn = erCurrent / erPast;
-  const apr = (exchangeRateReturn - 1) * annualizationFactor;
-  const aprBps = Math.round(apr * 10000);
-
-  const MAX_APR_BPS = 100000;
-  const clampedAprBps = Math.min(Math.max(aprBps, -MAX_APR_BPS), MAX_APR_BPS);
-
-  if (!Number.isFinite(clampedAprBps) || Number.isNaN(clampedAprBps)) {
-    ctx.log.warn(
-      `[NARA Rolling APR] Invalid aprBps=${aprBps} for network=${ctx.syncedNetwork}`
-    );
-    return { apr: null, historicalER };
-  }
-
-  return { apr: BigInt(clampedAprBps), historicalER };
-}
-
-async function calculateActualAPR(
-  ctx: ProcessorContext,
-  currentExchangeRate: bigint,
-  currentTimestamp: number,
-  naraApyChartPoints?: Map<string, NaraApyChartPoint>
-): Promise<bigint | null> {
-  if (getDayEndTimestamp(currentTimestamp) < getFirstEligibleApyTimestamp(7)) {
-    return null;
-  }
-
-  const actualDaysElapsed =
-    (currentTimestamp - START_APY_CALC_DATE) / (24 * 60 * 60 * 1000);
-
-  if (actualDaysElapsed < (MIN_HOURS_FOR_APR / 24)) {
-    return null;
-  }
-
-  if (currentExchangeRate === 0n) {
-    ctx.log.warn(`[NARA APR] Invalid current exchange rate (0) for network=${ctx.syncedNetwork}`);
-    return null;
-  }
-
-  const erPast = 1;
-  const erCurrent = Number(currentExchangeRate) / Number(10n ** EXCHANGE_RATE_DECIMALS);
-  const exchangeRateReturn = erCurrent / erPast;
-  const apr = (exchangeRateReturn - 1) * (365 / actualDaysElapsed);
-  const aprBps = Math.round(apr * 10000);
-
-  const MAX_APR_BPS = 100000;
-  const clampedAprBps = Math.min(Math.max(aprBps, -MAX_APR_BPS), MAX_APR_BPS);
-
-  if (!Number.isFinite(clampedAprBps) || Number.isNaN(clampedAprBps)) {
-    ctx.log.warn(`[NARA APR] Invalid aprBps=${aprBps} for network=${ctx.syncedNetwork}`);
-    return null;
-  }
-
-  return BigInt(clampedAprBps);
 }
 
 async function getReserveFundFormatted(
@@ -545,6 +475,7 @@ async function getMetricsAtBlock(
   naraUsdSupply: bigint;
   naraUsdSupplyFormatted: BigDecimal;
   naraUsdDecimals: number;
+  naraUsdPlusTotalAssets: bigint;
   naraUsdPlusVestingAmount: bigint;
   naraUsdPlusLastDistributionAt: bigint;
   naraUsdPlusVestingPeriod: bigint;
@@ -574,12 +505,13 @@ async function getMetricsAtBlock(
   const naraUsdSupply = naraUsdRawSupply;
   const naraUsdSupplyFormatted = naraUsdRawSupplyFormatted;
   let percentageStaked = BigDecimal(0);
+  let naraUsdPlusTotalAssets = 0n;
   let naraUsdPlusVestingAmount = 0n;
   let naraUsdPlusLastDistributionAt = 0n;
   let naraUsdPlusVestingPeriod = 0n;
 
   if (hasNaraYieldMetrics(ctx.syncedNetwork)) {
-    const naraUsdPlusAssetsRaw = BigInt(
+    naraUsdPlusTotalAssets = BigInt(
       await readContract(
         ctx,
         naraUsdPlusToken.address,
@@ -589,7 +521,7 @@ async function getMetricsAtBlock(
         blockHeight
       )
     );
-    const naraUsdPlusAssetsFormatted = BigDecimal(naraUsdPlusAssetsRaw.toString()).div(
+    const naraUsdPlusAssetsFormatted = BigDecimal(naraUsdPlusTotalAssets.toString()).div(
       BigDecimal((10n ** BigInt(naraUsdDecimals)).toString())
     );
     percentageStaked = naraUsdSupply > 0n
@@ -640,6 +572,7 @@ async function getMetricsAtBlock(
     naraUsdSupply,
     naraUsdSupplyFormatted,
     naraUsdDecimals,
+    naraUsdPlusTotalAssets,
     naraUsdPlusVestingAmount,
     naraUsdPlusLastDistributionAt,
     naraUsdPlusVestingPeriod,
@@ -825,7 +758,8 @@ async function updateGlobalStats(
   config: Config,
   naraGlobalStats: NaraGlobalStats,
   portVaults: Map<string, PortVault>,
-  portNavUpdates: Map<string, PortNavUpdate>
+  portNavUpdates: Map<string, PortNavUpdate>,
+  naraApyChartPoints?: Map<string, NaraApyChartPoint>
 ): Promise<NaraGlobalStats> {
   const isSynced = ctx.isHead && ctx.blocks.length === 1;
   const hasBackingMetrics = hasHubBackingMetrics(config);
@@ -879,21 +813,22 @@ async function updateGlobalStats(
     return naraGlobalStats;
   }
 
-  const currentExchangeRate = await getNaraUsdPlusExchangeRateAtBlock(ctx, block.header.height);
-  const [apy7d, apy14d, apy30d] = currentExchangeRate == null
-    ? [
-        { apr: null as bigint | null },
-        { apr: null as bigint | null },
-        { apr: null as bigint | null },
-      ]
-    : await Promise.all([
-        calculateRollingAPR(ctx, currentExchangeRate, block.header.timestamp, 7),
-        calculateRollingAPR(ctx, currentExchangeRate, block.header.timestamp, 14),
-        calculateRollingAPR(ctx, currentExchangeRate, block.header.timestamp, 30),
-      ]);
-  naraGlobalStats.apy7d = apy7d.apr ?? 0n;
-  naraGlobalStats.apy14d = apy14d.apr ?? 0n;
-  naraGlobalStats.apy30d = apy30d.apr ?? 0n;
+  const dbLatestApyChartPoints = await ctx.store.find(NaraApyChartPoint, {
+    where: { network: ctx.syncedNetwork },
+    order: { timestamp: 'DESC' },
+    take: 1,
+  });
+  const memLatestApyChartPoint = naraApyChartPoints
+    ? Array.from(naraApyChartPoints.values())
+        .filter((point) => point.network === ctx.syncedNetwork)
+        .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))[0]
+    : undefined;
+  const latestApyChartPoint = [dbLatestApyChartPoints[0], memLatestApyChartPoint]
+    .filter((point): point is NaraApyChartPoint => point != null)
+    .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))[0];
+  naraGlobalStats.apy7d = latestApyChartPoint?.apy7d ?? 0n;
+  naraGlobalStats.apy14d = latestApyChartPoint?.apy14d ?? 0n;
+  naraGlobalStats.apy30d = latestApyChartPoint?.apy30d ?? 0n;
   naraGlobalStats.weightedApy7d = await getWeightedApy7d(
     ctx,
     config,
@@ -909,12 +844,12 @@ async function updateGlobalStats(
 }
 
 export const naraService = {
-  calculateActualAPR,
-  calculateRollingAPR,
+  calculateVestingDistributionApr,
   getGlobalStats,
   hasNaraYieldMetrics,
-  getNaraUsdPlusExchangeRateAtBlock,
+  shouldUpdateGlobalStats,
   getNaraUsdPlusTotalAssetsAtBlock,
+  getNaraUsdPlusVestingDistributionAtBlock,
   getNaraUsdTotalSupplyAtBlock,
   getMetricsAtBlock,
   updateGlobalStats,

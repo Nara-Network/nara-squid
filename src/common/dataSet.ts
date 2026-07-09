@@ -36,21 +36,36 @@ const fields = {
   },
 } satisfies FieldSelection;
 
-const portalMaxBytes = 1024 * 1024;
+const DEFAULT_PORTAL_MAX_BYTES = 50 * 1024 * 1024;
+const DEFAULT_PORTAL_MAX_IDLE_TIME_MS = 2_000;
+const DEFAULT_PORTAL_MAX_WAIT_TIME_MS = 10_000;
+
+function getPositiveIntegerEnv(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (value == null) return fallback;
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 function padAddress(address: string) {
   return '0x' + address.slice(2).toLowerCase().padStart(64, '0');
 }
 
 function shouldIncludeAllBlocks(): boolean {
-  return process.env.INCLUDE_ALL_BLOCKS !== 'false';
+  return process.env.INCLUDE_ALL_BLOCKS === 'true';
 }
 
 export function generatePortalDataSet(configurator: Configurator) {
   const { startBlock, Port } = configurator.configFile;
 
   const dataSet = new DataSourceBuilder()
-    .setPortal({ url: configurator.portalUrl, maxBytes: portalMaxBytes })
+    .setPortal({
+      url: configurator.portalUrl,
+      maxBytes: getPositiveIntegerEnv('SQD_PORTAL_MAX_BYTES', DEFAULT_PORTAL_MAX_BYTES),
+      maxIdleTime: getPositiveIntegerEnv('SQD_PORTAL_MAX_IDLE_TIME_MS', DEFAULT_PORTAL_MAX_IDLE_TIME_MS),
+      maxWaitTime: getPositiveIntegerEnv('SQD_PORTAL_MAX_WAIT_TIME_MS', DEFAULT_PORTAL_MAX_WAIT_TIME_MS),
+    })
     .setFields(fields)
     .setBlockRange({ from: startBlock });
 

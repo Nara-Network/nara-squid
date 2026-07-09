@@ -28,6 +28,21 @@ export class NaraApyChartPoint {
     exchangeRate!: bigint
 
     @BigIntColumn_({nullable: false})
+    naraUsdSupply!: bigint
+
+    @BigIntColumn_({nullable: false})
+    naraUsdPlusTotalAssets!: bigint
+
+    @BigIntColumn_({nullable: false})
+    naraUsdPlusVestingAmount!: bigint
+
+    @BigIntColumn_({nullable: false})
+    naraUsdPlusLastDistributionAt!: bigint
+
+    @BigIntColumn_({nullable: false})
+    naraUsdPlusVestingPeriod!: bigint
+
+    @BigIntColumn_({nullable: false})
     apr!: bigint
 
     @BigIntColumn_({nullable: false})

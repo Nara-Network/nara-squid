@@ -1,5 +1,5 @@
-module.exports = class Data1783518276076 {
-    name = 'Data1783518276076'
+module.exports = class Data1783612860682 {
+    name = 'Data1783612860682'
 
     async up(db) {
         await db.query(`CREATE TABLE "token" ("id" character varying NOT NULL, "address" text NOT NULL, "network" character varying(16) NOT NULL, "name" text NOT NULL, "symbol" text NOT NULL, "decimals" numeric NOT NULL, "price" numeric NOT NULL, "is_pool_token" boolean NOT NULL, "coin_gecko_id" text, "tvl_multiplier" integer NOT NULL, CONSTRAINT "PK_82fae97f905930df5d62a702fc9" PRIMARY KEY ("id"))`)
@@ -38,7 +38,7 @@ module.exports = class Data1783518276076 {
         await db.query(`CREATE INDEX "IDX_e9a05a0bc52b6244ecd9c4e909" ON "nara_tvl_chart_point" ("network") `)
         await db.query(`CREATE INDEX "IDX_cf3e74235a27cda9498071f39b" ON "nara_tvl_chart_point" ("chain") `)
         await db.query(`CREATE INDEX "IDX_2bad7d295eae01d163f98acf1f" ON "nara_tvl_chart_point" ("timestamp") `)
-        await db.query(`CREATE TABLE "nara_apy_chart_point" ("id" character varying NOT NULL, "network" character varying(16) NOT NULL, "timestamp" numeric NOT NULL, "block" numeric NOT NULL, "updated_at" numeric NOT NULL, "exchange_rate" numeric NOT NULL, "apr" numeric NOT NULL, "apy7d" numeric NOT NULL, "apy14d" numeric NOT NULL, "apy30d" numeric NOT NULL, CONSTRAINT "PK_5ec62d975c6158d60228ef3ad8c" PRIMARY KEY ("id"))`)
+        await db.query(`CREATE TABLE "nara_apy_chart_point" ("id" character varying NOT NULL, "network" character varying(16) NOT NULL, "timestamp" numeric NOT NULL, "block" numeric NOT NULL, "updated_at" numeric NOT NULL, "exchange_rate" numeric NOT NULL, "nara_usd_supply" numeric NOT NULL, "nara_usd_plus_total_assets" numeric NOT NULL, "nara_usd_plus_vesting_amount" numeric NOT NULL, "nara_usd_plus_last_distribution_at" numeric NOT NULL, "nara_usd_plus_vesting_period" numeric NOT NULL, "apr" numeric NOT NULL, "apy7d" numeric NOT NULL, "apy14d" numeric NOT NULL, "apy30d" numeric NOT NULL, CONSTRAINT "PK_5ec62d975c6158d60228ef3ad8c" PRIMARY KEY ("id"))`)
         await db.query(`CREATE INDEX "IDX_7d48d7547ad17620d0adcdb0f4" ON "nara_apy_chart_point" ("network") `)
         await db.query(`CREATE INDEX "IDX_6c9dc0e906a792145f68a710e3" ON "nara_apy_chart_point" ("timestamp") `)
         await db.query(`CREATE TABLE "total_requested_amount" ("id" character varying NOT NULL, "collateral_address" text NOT NULL, "amount" numeric NOT NULL, CONSTRAINT "PK_d71476809bf7fc796c6c398b1a0" PRIMARY KEY ("id"))`)

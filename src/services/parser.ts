@@ -653,15 +653,13 @@ async function parseAtomicRequestFulfilled(
   portWithdrawalRequests: Map<string, PortWithdrawalRequest>,
   users: Map<string, User>,
   portVaults: Map<string, PortVault>,
-  portVaultTransactionHistories: Map<string, PortVaultTransactionHistory>,
-  portGlobalStats: PortGlobalStats
+  portVaultTransactionHistories: Map<string, PortVaultTransactionHistory>
 ): Promise<{
   portRequestFulfilleds: Map<string, PortRequestFulfilled>,
   portWithdrawalRequests: Map<string, PortWithdrawalRequest>,
   users: Map<string, User>,
   portVaults: Map<string, PortVault>,
-  portVaultTransactionHistories: Map<string, PortVaultTransactionHistory>,
-  portGlobalStats: PortGlobalStats
+  portVaultTransactionHistories: Map<string, PortVaultTransactionHistory>
 }> {
   const {
     user: userAddress,
@@ -747,7 +745,7 @@ async function parseAtomicRequestFulfilled(
   );
   await eerService.recordAtomicRequestFulfilledEvent(ctx, portVault, log, config);
 
-  return { portRequestFulfilleds, portWithdrawalRequests, users, portVaults, portVaultTransactionHistories, portGlobalStats };
+  return { portRequestFulfilleds, portWithdrawalRequests, users, portVaults, portVaultTransactionHistories };
 }
 
 async function parseLendingRateUpdated(ctx: ProcessorContext, log: Log, config: Config, portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>, portVaultAPYs: Map<string, PortVaultAPY>): Promise<{ portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>, portVaultAPYs: Map<string, PortVaultAPY> }> {
