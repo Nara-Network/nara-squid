@@ -228,18 +228,67 @@ async function getGlobalStats(ctx: ProcessorContext): Promise<PortGlobalStats> {
   return portGlobalStats[0];
 }
 
-async function calculateAPRFromRate(ctx: ProcessorContext, lastNavUpdate: PortNavUpdate, vault: PortVault, startApyCalculationTimestamp?: number): Promise<bigint> {
+async function calculateAPRFromRate(ctx: ProcessorContext, lastNavUpdate: PortNavUpdate, vault: PortVault, startApyCalculationTimestamp?: number, portNavUpdates?: Map<string, PortNavUpdate>): Promise<bigint> {
   const navDecimals = Math.pow(10, 18);
+  const vaultAddressLower = vault.address.toLowerCase();
 
-  let navStartRaw = 0;
-  let navEndRaw = 0;
-  let timeStart = 0;
   const timeEnd = Number(lastNavUpdate.timestamp);
+  const timeStart = startApyCalculationTimestamp ?? Number(vault.startedAt);
 
-  timeStart = startApyCalculationTimestamp ?? Number(vault.startedAt);
+  // Baseline NAV at the start of the APY window: the most recent NAV update at
+  // or before timeStart. Seeded/migrated vaults launch with a rate above 1.0,
+  // so a hardcoded 1.0 baseline would wildly overstate the APR.
+  let navStartRaw = navDecimals;
 
-  navStartRaw = Number(BigInt(1 * navDecimals));
-  navEndRaw = Number(lastNavUpdate.newRate);
+  const dbBaselineNavUpdates = await ctx.store.find(PortNavUpdate, {
+    where: {
+      vault: { address: vault.address, network: ctx.syncedNetwork },
+      timestamp: LessThanOrEqual(BigInt(timeStart))
+    },
+    order: { timestamp: 'DESC' },
+    take: 1
+  });
+
+  const memBaselineNavUpdates = portNavUpdates
+    ? Array.from(portNavUpdates.values())
+      .filter(update => update.vault.address.toLowerCase() === vaultAddressLower && Number(update.timestamp) <= timeStart)
+      .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))
+      .slice(0, 1)
+    : [];
+
+  const baselineNavUpdate = [...memBaselineNavUpdates, ...dbBaselineNavUpdates]
+    .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))[0];
+
+  if (baselineNavUpdate && baselineNavUpdate.newRate !== 0n) {
+    navStartRaw = Number(baselineNavUpdate.newRate);
+  } else {
+    // No update at or before the start: fall back to the rate the vault held
+    // just before its first update after the start (that update's oldRate).
+    const dbFirstNavUpdates = await ctx.store.find(PortNavUpdate, {
+      where: {
+        vault: { address: vault.address, network: ctx.syncedNetwork },
+        timestamp: MoreThanOrEqual(BigInt(timeStart))
+      },
+      order: { timestamp: 'ASC' },
+      take: 1
+    });
+
+    const memFirstNavUpdates = portNavUpdates
+      ? Array.from(portNavUpdates.values())
+        .filter(update => update.vault.address.toLowerCase() === vaultAddressLower && Number(update.timestamp) >= timeStart)
+        .sort((a, b) => Number(a.timestamp) - Number(b.timestamp))
+        .slice(0, 1)
+      : [];
+
+    const firstNavUpdate = [...memFirstNavUpdates, ...dbFirstNavUpdates]
+      .sort((a, b) => Number(a.timestamp) - Number(b.timestamp))[0];
+
+    if (firstNavUpdate && firstNavUpdate.oldRate !== 0n) {
+      navStartRaw = Number(firstNavUpdate.oldRate);
+    }
+  }
+
+  const navEndRaw = Number(lastNavUpdate.newRate);
 
   const navStart = navStartRaw / navDecimals;
   const navEnd = navEndRaw / navDecimals;
@@ -358,18 +407,20 @@ async function calculateApyBetweenUpdates(
   for (const update of [...dbNavUpdates, ...memNavUpdates]) {
     allUpdatesMap[update.id] = update;
   }
-  let updates = Object.values(allUpdatesMap)
+  const updates = Object.values(allUpdatesMap)
     .sort((a, b) => Number(b.timestamp) - Number(a.timestamp));
-
-  if (startApyCalculationTimestamp !== undefined) {
-    updates = updates.filter(update => Number(update.timestamp) >= startApyCalculationTimestamp);
-  }
 
   if (updates.length < 2) {
     return null;
   }
 
   const latest = updates[0];
+
+  // Only the latest update must fall after the APY calculation start; the
+  // previous update merely provides the baseline rate, so it may predate it.
+  if (startApyCalculationTimestamp !== undefined && Number(latest.timestamp) < startApyCalculationTimestamp) {
+    return null;
+  }
 
   // Use the most recent earlier update that is at least MIN_APY_CALCULATION_ELAPSED_MS
   // older than the latest one, so same-block / near-simultaneous updates don't
