@@ -1,1212 +1,1619 @@
-import { ProcessorContext } from '../common/dataSet';
+import { ProcessorContext, Log } from '../common/dataSet';
 
 import { Config } from '../common/types';
-import { calculateUsdPriceInBN, convertToBaseTokenAmount, readContract } from '../helpers/common';
-
-import { Network, PortVault, PortWithdrawalRequest, PortWithdrawalRequestStatus, PortVaultStatus, PortNavUpdate, PortGlobalStats, PortVaultAPY, PortVaultType, ExpectedExchangeRate, PortVaultApyChart } from '../model';
+import { convertToBaseTokenAmount, isTestnet, readContract, normalizeDecimals, clampToZero, getTokenDecimalsCached } from '../helpers/common';
+import { getEERConfigForVault, isEERDebugEnabled } from '../helpers/eer';
+import { PortVault, User, PortDeposit, PortWithdrawalRequest, PortWithdrawalRequestStatus, PortVaultStatus, PortVaultStatusUpdate, PortNavUpdate, PortGlobalStats, PortRequestFulfilled, PortVaultActivity, PortVaultAction, PortVaultTransactionHistory, PortVaultTxAction, PortVaultAPY, PortVaultType, FundsDiverted, FundsReverted, StrategyKind, StrategyYieldSnapshot, StrategyYieldState, ManagerWithdraw, ManagerDeposit, PortVaultApyChart, NaraRedemption, NaraRedemptionActivity, NaraRedemptionAction, NaraRedemptionStatus, TotalRequestedAmount } from '../model';
 import * as BoringVaultAbi from '../abi/BoringVault';
 import * as AccountantAbi from '../abi/AccountantWithRateProviders';
+import * as AtomicQueueAbi from '../abi/AtomicQueue';
 import * as TellerAbi from '../abi/TellerWithMultiAssetSupport';
+import * as AaveV3PoolAbi from '../abi/AaveV3Pool';
+import * as CompoundUSDCAbi from '../abi/CompoundUSDC';
+import * as ERC20Abi from '../abi/ERC20';
+import * as NaraUSD from '../abi/NaraUSD';
+import { userService } from './user';
 import { tokensService } from './tokens';
-import { In, Not, MoreThanOrEqual, LessThan, LessThanOrEqual } from 'typeorm';
-import { toEntityMap } from '../common/mapping/helpers';
+import { In, Not } from 'typeorm';
+import { SKIP_ACTIVITY_TX_HASHES } from '../constants';
 import { throwError } from '../common/utils/error';
-import { floorToHour, floorToMonthUTC, toSec } from '../common/utils/time';
+import { portService } from './port';
+import { toSec } from '../common/utils/time';
+import { eerService } from './eer';
 
-let PORT_INITIALIZED_VAULTS = new Map<string, boolean>();
-let LAST_AVG_APY_UPDATE: Date | undefined;
-let AVG_APY_UPDATE_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
-let LAST_APY_CHART_UPDATE: Date | undefined;
-let PRUNED_APY_CHARTS_BEFORE_START = new Set<string>();
-const MIN_APY_CALCULATION_ELAPSED_MS = 60 * 60 * 1000;
-
-function isBeforeApyCalculationStart(timestamp: number, startApyCalculationTimestamp?: number): boolean {
-  return startApyCalculationTimestamp !== undefined && timestamp < startApyCalculationTimestamp;
+function createEmptyUser(userId: string, address: string, network: ProcessorContext['syncedNetwork']): User {
+  return new User({
+    id: userId,
+    address: address.toLowerCase(),
+    isTestnet: isTestnet(network),
+    portWithdrawalRequests: [],
+    portDeposits: [],
+    naraRedemptions: [],
+  });
 }
 
-async function prunePortVaultApyChartsBeforeStart(
+async function getPendingNaraRedemption(
   ctx: ProcessorContext,
-  vault: PortVault,
-  portVaultApyCharts: Map<string, PortVaultApyChart>,
-  startApyCalculationTimestamp?: number
-): Promise<void> {
-  if (startApyCalculationTimestamp === undefined) {
-    return;
+  userId: string,
+  naraRedemptions: Map<string, NaraRedemption>,
+): Promise<NaraRedemption | undefined> {
+  const inMemoryPending = Array.from(naraRedemptions.values()).find(
+    (redemption) => redemption.user.id === userId && redemption.status === NaraRedemptionStatus.REQUESTED
+  );
+
+  if (inMemoryPending) {
+    return inMemoryPending;
   }
 
-  const pruneKey = `${ctx.syncedNetwork}-${vault.address.toLowerCase()}-${startApyCalculationTimestamp}`;
-  if (PRUNED_APY_CHARTS_BEFORE_START.has(pruneKey)) {
-    return;
+  return ctx.store.findOne(NaraRedemption, {
+    where: {
+      id: Not(In(Array.from(naraRedemptions.keys()))),
+      user: { id: userId },
+      status: NaraRedemptionStatus.REQUESTED,
+    },
+    relations: { user: true },
+  });
+}
+
+function getTotalRequestedAmountId(collateralAddress: string): string {
+  return collateralAddress.toLowerCase();
+}
+
+async function getTotalRequestedAmount(
+  ctx: ProcessorContext,
+  collateralAddress: string,
+  totalRequestedAmounts: Map<string, TotalRequestedAmount>,
+): Promise<TotalRequestedAmount> {
+  const normalizedCollateralAddress = collateralAddress.toLowerCase();
+  const totalRequestedAmountId = getTotalRequestedAmountId(normalizedCollateralAddress);
+  const inMemory = totalRequestedAmounts.get(totalRequestedAmountId);
+
+  if (inMemory) {
+    return inMemory;
   }
 
-  for (const [chartId, chart] of portVaultApyCharts) {
-    if (chart.vault?.address === vault.address && Number(chart.timestamp) < startApyCalculationTimestamp) {
-      portVaultApyCharts.delete(chartId);
+  const persisted = await ctx.store.findOne(TotalRequestedAmount, {
+    where: { id: totalRequestedAmountId },
+  });
+
+  if (persisted) {
+    totalRequestedAmounts.set(persisted.id, persisted);
+    return persisted;
+  }
+
+  const totalRequestedAmount = new TotalRequestedAmount({
+    id: totalRequestedAmountId,
+    collateralAddress: normalizedCollateralAddress,
+    amount: 0n,
+  });
+
+  totalRequestedAmounts.set(totalRequestedAmount.id, totalRequestedAmount);
+  return totalRequestedAmount;
+}
+
+async function applyTotalRequestedAmountDelta(
+  ctx: ProcessorContext,
+  totalRequestedAmounts: Map<string, TotalRequestedAmount>,
+  collateralAddress: string,
+  delta: bigint,
+): Promise<Map<string, TotalRequestedAmount>> {
+  if (delta === 0n) {
+    return totalRequestedAmounts;
+  }
+
+  const totalRequestedAmount = await getTotalRequestedAmount(ctx, collateralAddress, totalRequestedAmounts);
+  const nextAmount = totalRequestedAmount.amount + delta;
+
+  if (nextAmount < 0n) {
+    ctx.log.warn(
+      `[NARA] TotalRequestedAmount underflow prevented for collateral=${collateralAddress.toLowerCase()} current=${totalRequestedAmount.amount.toString()} delta=${delta.toString()}`
+    );
+  }
+
+  totalRequestedAmount.amount = clampToZero(nextAmount);
+  totalRequestedAmounts.set(totalRequestedAmount.id, totalRequestedAmount);
+
+  return totalRequestedAmounts;
+}
+
+async function parseNaraRedemptionActivity(
+  ctx: ProcessorContext,
+  log: Log,
+  users: Map<string, User>,
+  naraRedemptions: Map<string, NaraRedemption>,
+  naraRedemptionActivities: Map<string, NaraRedemptionActivity>,
+  totalRequestedAmounts: Map<string, TotalRequestedAmount>,
+): Promise<{
+  users: Map<string, User>,
+  naraRedemptions: Map<string, NaraRedemption>,
+  naraRedemptionActivities: Map<string, NaraRedemptionActivity>,
+  totalRequestedAmounts: Map<string, TotalRequestedAmount>,
+}> {
+  let action: NaraRedemptionAction;
+  let userAddress: string;
+  let collateralAssetAddress: string;
+  let naraUsdAmount: bigint;
+  let collateralAmount: bigint | undefined;
+  const timestamp = BigInt(log.block.timestamp);
+
+  switch (log.topics[0]) {
+    case NaraUSD.events.Redeem.topic: {
+      const { beneficiary, collateralAsset, naraUsdAmount: redeemAmount, collateralAmount: redeemedCollateral } =
+        NaraUSD.events.Redeem.decode(log);
+      action = NaraRedemptionAction.INSTANT_REDEEM;
+      userAddress = beneficiary.toLowerCase();
+      collateralAssetAddress = collateralAsset.toLowerCase();
+      naraUsdAmount = redeemAmount;
+      collateralAmount = redeemedCollateral;
+      break;
+    }
+    case NaraUSD.events.RedemptionRequested.topic: {
+      const { user, naraUsdAmount: requestedAmount, collateralAsset } =
+        NaraUSD.events.RedemptionRequested.decode(log);
+      action = NaraRedemptionAction.REQUESTED;
+      userAddress = user.toLowerCase();
+      collateralAssetAddress = collateralAsset.toLowerCase();
+      naraUsdAmount = requestedAmount;
+      collateralAmount = undefined;
+      break;
+    }
+    case NaraUSD.events.RedemptionCompleted.topic: {
+      const { user, naraUsdAmount: completedAmount, collateralAsset, collateralAmount: completedCollateral } =
+        NaraUSD.events.RedemptionCompleted.decode(log);
+      action = NaraRedemptionAction.COMPLETED;
+      userAddress = user.toLowerCase();
+      collateralAssetAddress = collateralAsset.toLowerCase();
+      naraUsdAmount = completedAmount;
+      collateralAmount = completedCollateral;
+      break;
+    }
+    default:
+      return { users, naraRedemptions, naraRedemptionActivities, totalRequestedAmounts };
+  }
+  const userId = userService.getUserId(userAddress, ctx.syncedNetwork);
+  let user = users.get(userId) ?? await userService.getUserById(ctx, userId);
+
+  if (!user) {
+    user = createEmptyUser(userId, userAddress, ctx.syncedNetwork);
+    users.set(userId, user);
+  }
+
+  let redemption: NaraRedemption;
+  if (action === NaraRedemptionAction.INSTANT_REDEEM) {
+    redemption = new NaraRedemption({
+      id: `${log.transactionHash}-${log.logIndex}`,
+      user,
+      status: NaraRedemptionStatus.COMPLETED,
+      naraUsdAmount,
+      collateralAmount,
+      collateralAssetAddress,
+      requestedAt: timestamp,
+      completedAt: timestamp,
+      updatedAt: timestamp,
+      activities: [],
+    });
+  } else if (action === NaraRedemptionAction.REQUESTED) {
+    const existingPendingRedemption = await getPendingNaraRedemption(ctx, userId, naraRedemptions);
+
+    if (existingPendingRedemption) {
+      totalRequestedAmounts = await applyTotalRequestedAmountDelta(
+        ctx,
+        totalRequestedAmounts,
+        existingPendingRedemption.collateralAssetAddress,
+        -existingPendingRedemption.naraUsdAmount,
+      );
+
+      existingPendingRedemption.status = NaraRedemptionStatus.REQUESTED;
+      existingPendingRedemption.naraUsdAmount = naraUsdAmount;
+      existingPendingRedemption.collateralAssetAddress = collateralAssetAddress;
+      existingPendingRedemption.collateralAmount = undefined;
+      existingPendingRedemption.updatedAt = timestamp;
+      redemption = existingPendingRedemption;
+    } else {
+      redemption = new NaraRedemption({
+        id: `${userId}-${log.transactionHash}-${log.logIndex}`,
+        user,
+        status: NaraRedemptionStatus.REQUESTED,
+        naraUsdAmount,
+        collateralAmount: undefined,
+        collateralAssetAddress,
+        requestedAt: timestamp,
+        completedAt: undefined,
+        updatedAt: timestamp,
+        activities: [],
+      });
+    }
+
+    totalRequestedAmounts = await applyTotalRequestedAmountDelta(
+      ctx,
+      totalRequestedAmounts,
+      collateralAssetAddress,
+      naraUsdAmount,
+    );
+  } else {
+    const existingPendingRedemption = await getPendingNaraRedemption(ctx, userId, naraRedemptions);
+
+    if (!existingPendingRedemption) {
+      throwError(`Pending Nara redemption not found - parseNaraRedemptionActivity failed.`, log.transactionHash);
+    }
+
+    totalRequestedAmounts = await applyTotalRequestedAmountDelta(
+      ctx,
+      totalRequestedAmounts,
+      existingPendingRedemption.collateralAssetAddress,
+      -existingPendingRedemption.naraUsdAmount,
+    );
+
+    existingPendingRedemption.status = NaraRedemptionStatus.COMPLETED;
+    existingPendingRedemption.naraUsdAmount = naraUsdAmount;
+    existingPendingRedemption.collateralAssetAddress = collateralAssetAddress;
+    existingPendingRedemption.collateralAmount = collateralAmount;
+    existingPendingRedemption.completedAt = timestamp;
+    existingPendingRedemption.updatedAt = timestamp;
+    redemption = existingPendingRedemption;
+  }
+
+  naraRedemptions.set(redemption.id, redemption);
+
+  const activity = new NaraRedemptionActivity({
+    id: `${log.transactionHash}-${log.logIndex}`,
+    redemption,
+    action,
+    naraUsdAmount,
+    collateralAmount,
+    collateralAssetAddress,
+    timestamp,
+    txHash: log.transactionHash,
+    block: BigInt(log.block.height),
+  });
+
+  naraRedemptionActivities.set(activity.id, activity);
+
+  return { users, naraRedemptions, naraRedemptionActivities, totalRequestedAmounts };
+}
+
+async function parseVaultEnter(ctx: ProcessorContext, log: Log, config: Config, portDeposits: Map<string, PortDeposit>, users: Map<string, User>, portVaults: Map<string, PortVault>, portGlobalStats: PortGlobalStats, portVaultTransactionHistories: Map<string, PortVaultTransactionHistory>): Promise<{ portDeposits: Map<string, PortDeposit>, users: Map<string, User>, portVaults: Map<string, PortVault>, portGlobalStats: PortGlobalStats, portVaultTransactionHistories: Map<string, PortVaultTransactionHistory> }> {
+  const { from, asset, amount, shares } = BoringVaultAbi.events.Enter.decode(log);
+  const userId = userService.getUserId(from, ctx.syncedNetwork);
+
+  const portVault = portVaults.get(log.address) ?? await portService.getPortVaultByAddress(ctx, log.address);
+
+  if (!portVault) {
+    throwError(`Port vault not found - parseVaultEnter failed.`, log.transactionHash);
+  }
+
+  // Log Enter event
+  ctx.log.info(
+    `[ENTER EVENT] vault=${portVault.address} ` +
+    `from=${from.toLowerCase()} ` +
+    `asset=${asset.toLowerCase()} ` +
+    `amount=${amount.toString()} ` +
+    `shares=${shares.toString()} ` +
+    `txHash=${log.transactionHash} ` +
+    `block=${log.block.height}`
+  )
+
+  const token = await tokensService.getTokenByAddress(ctx, asset);
+
+  if (!token) {
+    throwError(`Token not found - parseVaultEnter failed.`, log.transactionHash);
+  }
+
+  const portDepositId = `${from}-${log.address}-${log.transactionHash}`;
+
+  let user = users.get(userId) ?? await userService.getUserById(ctx, userId);
+
+  if (!user) {
+    user = createEmptyUser(userId, from, ctx.syncedNetwork);
+    users.set(userId, user);
+  }
+  const portDeposit = new PortDeposit({
+    id: portDepositId,
+    vault: portVault,
+    user,
+    asset: token,
+    amount,
+    shares: BigInt(shares),
+    txHash: log.transactionHash,
+    timestamp: BigInt(log.block.timestamp),
+    block: BigInt(log.block.height),
+  });
+
+  portDeposits.set(portDepositId, portDeposit);
+
+  if (!user.portDeposits?.length) {
+    portGlobalStats.activeUsers = portGlobalStats.activeUsers + BigInt(1);
+  }
+
+  const portVaultTransactionHistory = new PortVaultTransactionHistory({
+    id: `${portDepositId}`,
+    vault: portVault,
+    user,
+    asset: token.address,
+    amount,
+    action: PortVaultTxAction.DEPOSIT,
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
+  });
+
+  portVaultTransactionHistories.set(portVaultTransactionHistory.id, portVaultTransactionHistory);
+
+  portVaults.set(portVault.address.toLowerCase(), portVault);
+
+  // ============================================================================
+  // EER: ONE CALL ONLY - record event to inbox
+  // ============================================================================
+  const ts = toSec(log.block.timestamp);
+  ctx.log.info(
+    `[EER PARSER] kind=ENTER vault=${portVault.address} vaultId=${portVault.id} ` +
+    `block=${log.block.height} ts=${ts} tx=${log.transactionHash} idx=${log.logIndex} ` +
+    `asset=${asset.toLowerCase()} amountRaw=${amount.toString()} sharesRaw=${shares.toString()}`
+  );
+  await eerService.recordEnterEvent(ctx, portVault, log);
+
+  return { portDeposits, users, portVaults, portGlobalStats, portVaultTransactionHistories };
+}
+
+async function parseAtomicRequestUpdated(ctx: ProcessorContext, log: Log, portWithdrawalRequests: Map<string, PortWithdrawalRequest>, users: Map<string, User>, portVaults: Map<string, PortVault>, portVaultTransactionHistories: Map<string, PortVaultTransactionHistory>): Promise<{ portWithdrawalRequests: Map<string, PortWithdrawalRequest>, users: Map<string, User>, portVaults: Map<string, PortVault>, portVaultTransactionHistories: Map<string, PortVaultTransactionHistory> }> {
+  const { user: from, wantToken: asset, offerToken: vaultAddress, amount: offerAmount, deadline: deadlineSec, timestamp: timestampSec, minPrice } = AtomicQueueAbi.events.AtomicRequestUpdated.decode(log);
+  const timestamp = BigInt(timestampSec) * BigInt(1000);
+  const deadline = BigInt(deadlineSec) * BigInt(1000);
+
+  const portVault = portVaults.get(vaultAddress) ?? await portService.getPortVaultByAddress(ctx, vaultAddress);
+
+  if (!portVault) {
+    throwError(`Port vault not found - parseAtomicRequestUpdated failed.`, log.transactionHash);
+  }
+
+  const price = portVault.currentNav;
+  const priceInBaseToken = convertToBaseTokenAmount(price, BigInt(portVault.decimals), BigInt(18));
+
+  const userId = userService.getUserId(from, ctx.syncedNetwork);
+
+  let user = users.get(userId) ?? await userService.getUserById(ctx, userId);
+
+  if (!user) {
+    user = createEmptyUser(userId, from, ctx.syncedNetwork);
+    users.set(userId, user);
+  }
+
+  const wantToken = await tokensService.getTokenByAddress(ctx, asset);
+  // Offert amount is in base decimals already, 
+  const wantAmountInBaseToken = offerAmount * BigInt(priceInBaseToken) / BigInt(10 ** Number(portVault.decimals));
+  const portWithdrawalRequestId = `${from}-${vaultAddress}-${log.transactionHash}`;
+
+  if (!wantToken) {
+    throwError(`Token for withdrawal request not found - parseAtomicRequestUpdated failed.`, log.transactionHash);
+  }
+
+  const existingPortWithdrawalRequest = Array.from(portWithdrawalRequests.values()).find(r => r.vault.address == vaultAddress && r.user.id == userId && r.status == PortWithdrawalRequestStatus.PENDING) ?? await ctx.store.findOne(PortWithdrawalRequest, { where: { id: Not(In(Array.from(portWithdrawalRequests.keys()))), vault: { address: vaultAddress, network: ctx.syncedNetwork }, user: { id: userId }, status: PortWithdrawalRequestStatus.PENDING }, relations: { vault: true, user: true } });
+
+  if (!existingPortWithdrawalRequest) {
+    const portWithdrawalRequest = new PortWithdrawalRequest({
+      id: portWithdrawalRequestId,
+      vault: portVault,
+      user,
+      wantToken,
+      wantAmount: wantAmountInBaseToken,
+      offerAmount,
+      txHash: log.transactionHash,
+      timestamp: BigInt(timestamp),
+      deadline: BigInt(deadline),
+      block: BigInt(log.block.height),
+      status: PortWithdrawalRequestStatus.PENDING,
+    });
+    portWithdrawalRequests.set(portWithdrawalRequestId, portWithdrawalRequest);
+
+    portVault.totalPendingWithdrawalRequests = portVault.totalPendingWithdrawalRequests + BigInt(1);
+    portVault.totalWithdrawalRequestsInBaseToken = portVault.totalWithdrawalRequestsInBaseToken + offerAmount;
+    portVaults.set(vaultAddress, portVault);
+
+    const portVaultTransactionHistory = new PortVaultTransactionHistory({
+      id: `${portWithdrawalRequestId}`,
+      vault: portVault,
+      user,
+      asset: vaultAddress,
+      amount: offerAmount,
+      action: PortVaultTxAction.WITHDRAWAL_REQUEST_CREATED,
+      timestamp: BigInt(timestamp),
+      txHash: log.transactionHash,
+    });
+    portVaultTransactionHistories.set(portVaultTransactionHistory.id, portVaultTransactionHistory);
+  } else {
+    const previousOfferAmount = existingPortWithdrawalRequest.offerAmount;
+
+    existingPortWithdrawalRequest.deadline = BigInt(deadline);
+    existingPortWithdrawalRequest.timestamp = BigInt(timestamp);
+    existingPortWithdrawalRequest.offerAmount = offerAmount;
+    existingPortWithdrawalRequest.txHash = log.transactionHash;
+    existingPortWithdrawalRequest.wantToken = wantToken;
+    existingPortWithdrawalRequest.wantAmount = wantAmountInBaseToken;
+    portWithdrawalRequests.set(existingPortWithdrawalRequest.id, existingPortWithdrawalRequest);
+
+    portVault.totalWithdrawalRequestsInBaseToken = portVault.totalWithdrawalRequestsInBaseToken - previousOfferAmount + offerAmount;
+    portVaults.set(vaultAddress, portVault);
+
+    const existingPortVaultTransactionHistory = portVaultTransactionHistories.get(`${existingPortWithdrawalRequest.id}`) ?? await ctx.store.findOne(PortVaultTransactionHistory, { where: { id: `${existingPortWithdrawalRequest.id}`, vault: { network: ctx.syncedNetwork } } });
+
+    if (existingPortVaultTransactionHistory) {
+      existingPortVaultTransactionHistory.amount = offerAmount;
+      existingPortVaultTransactionHistory.timestamp = BigInt(timestamp);
+      existingPortVaultTransactionHistory.txHash = log.transactionHash;
+      existingPortVaultTransactionHistory.asset = vaultAddress;
+      portVaultTransactionHistories.set(existingPortVaultTransactionHistory.id, existingPortVaultTransactionHistory);
     }
   }
 
-  const staleCharts = await ctx.store.find(PortVaultApyChart, {
-    where: {
-      vault: { address: vault.address, network: ctx.syncedNetwork },
-      timestamp: LessThan(BigInt(startApyCalculationTimestamp)),
-    },
-    relations: { vault: true },
-  });
-
-  if (staleCharts.length > 0) {
-    await ctx.store.remove(staleCharts);
-  }
-
-  PRUNED_APY_CHARTS_BEFORE_START.add(pruneKey);
+  return { portWithdrawalRequests, users, portVaults, portVaultTransactionHistories };
 }
 
-async function getPortVaultByAddress(ctx: ProcessorContext, address: string): Promise<PortVault | null> {
-  const portVault = await ctx.store.findOne(PortVault, { where: { address: address.toLowerCase(), network: ctx.syncedNetwork }, relations: { baseToken: true } })
-  return portVault ?? null;
-}
-
-async function initializePort({ ctx, config, portVaults, expectedExchangeRates }: { ctx: ProcessorContext, config: Config, portVaults: Map<string, PortVault>, expectedExchangeRates: Map<string, ExpectedExchangeRate> }): Promise<{ portVaults: Map<string, PortVault>, expectedExchangeRates: Map<string, ExpectedExchangeRate> }> {
-  if (ctx.syncedNetwork !== Network.ETHEREUM && ctx.syncedNetwork !== Network.ETHEREUM_SEPOLIA) {
-    return { portVaults, expectedExchangeRates };
-  }
+async function parseVaultStatusUpdate(ctx: ProcessorContext, log: Log, config: Config, portVaults: Map<string, PortVault>, status: PortVaultStatus, portVaultStatusUpdates: Map<string, PortVaultStatusUpdate>, portVaultActivities: Map<string, PortVaultActivity>): Promise<{ portVaults: Map<string, PortVault>, portVaultStatusUpdates: Map<string, PortVaultStatusUpdate>, portVaultActivities: Map<string, PortVaultActivity> }> {
+  const tellerAddress = log.address;
 
   const configuredPortVaults = config.Port?.Vaults;
+
   if (!configuredPortVaults?.length) {
-    return { portVaults, expectedExchangeRates };
+    throwError(`Configured port vaults not found - parseVaultStatusUpdate failed.`, log.transactionHash);
   }
 
-  for (const portVault of configuredPortVaults) {
-    const vaultKey = `${ctx.syncedNetwork}-${portVault.address.toLowerCase()}`;
-    if (PORT_INITIALIZED_VAULTS.get(vaultKey)) {
-      continue;
+  const portVaultAddress = configuredPortVaults.find((vault) => vault.Teller.toLowerCase() == tellerAddress.toLowerCase())?.address;
+
+  if (!portVaultAddress) {
+    throwError(`Port vault address not found - parseVaultStatusUpdate failed.`, log.transactionHash);
+  }
+
+  const portVault = portVaults.get(portVaultAddress.toLowerCase()) ?? await portService.getPortVaultByAddress(ctx, portVaultAddress);
+
+  if (!portVault) {
+    throwError(`Port vault not found - parseVaultStatusUpdate failed.`, log.transactionHash);
+  }
+
+  if (portVault.status === status) {
+    return { portVaults, portVaultStatusUpdates, portVaultActivities };
+  }
+
+  portVault.status = status;
+  portVault.totalActivity = portVault.totalActivity + BigInt(1);
+  portVaults.set(portVaultAddress.toLowerCase(), portVault);
+
+  const newPortVaultStatusUpdate = new PortVaultStatusUpdate({
+    id: `${portVaultAddress}-${status}-${log.transactionHash}`,
+    vault: portVault,
+    newStatus: status,
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
+    block: BigInt(log.block.height),
+  });
+
+  portVaultStatusUpdates.set(newPortVaultStatusUpdate.id, newPortVaultStatusUpdate);
+
+  const portVaultActivity = new PortVaultActivity({
+    id: `${PortVaultAction.VAULT_STATUS_UPDATE}-${portVaultAddress}-${log.transactionHash}`,
+    vault: portVault,
+    action: PortVaultAction.VAULT_STATUS_UPDATE,
+    details: status,
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
+  });
+
+  portVaultActivities.set(portVaultActivity.id, portVaultActivity);
+
+  return { portVaults, portVaultStatusUpdates, portVaultActivities };
+}
+
+async function parseNavUpdate(ctx: ProcessorContext, log: Log, config: Config, portNavUpdates: Map<string, PortNavUpdate>, portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>, portVaultAPYs: Map<string, PortVaultAPY>, portVaultApyCharts: Map<string, PortVaultApyChart>): Promise<{ portNavUpdates: Map<string, PortNavUpdate>, portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>, portVaultAPYs: Map<string, PortVaultAPY>, portVaultApyCharts: Map<string, PortVaultApyChart> }> {
+  const accountantAddress = log.address;
+
+  if (SKIP_ACTIVITY_TX_HASHES.includes(log.transactionHash)) {
+    return { portNavUpdates, portVaults, portVaultActivities, portVaultAPYs, portVaultApyCharts };
+  }
+
+  const { newRate, oldRate } = AccountantAbi.events.ExchangeRateUpdated.decode(log);
+
+  const portVaultAddress = config.Port?.Vaults?.find((vault) => vault.Accountant.toLowerCase() == accountantAddress.toLowerCase())?.address;
+
+  if (!portVaultAddress) {
+    throwError(`Port vault address not found - parseNavUpdate failed.`, log.transactionHash);
+  }
+
+  const portVault = portVaults.get(portVaultAddress.toLowerCase()) ?? await portService.getPortVaultByAddress(ctx, portVaultAddress);
+
+  if (!portVault) {
+    throwError(`Port vault not found - parseNavUpdate failed.`, log.transactionHash);
+  }
+
+  const isSynced = ctx.isHead && ctx.blocks.length === 1;
+
+  portVault.currentNav = BigInt(newRate);
+  portVault.totalActivity = portVault.totalActivity + BigInt(1);
+
+  const newPortNavUpdate = new PortNavUpdate({
+    id: `${portVaultAddress}-${newRate}-${log.transactionHash}`,
+    vault: portVault,
+    newRate: BigInt(newRate),
+    oldRate: BigInt(oldRate),
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
+    block: BigInt(log.block.height),
+  });
+  portNavUpdates.set(newPortNavUpdate.id, newPortNavUpdate);
+
+
+  if (portVault.type === PortVaultType.STANDARD) {
+    const startApyCalculationTimestamp = config.Port?.Vaults?.find((vault) => vault.address.toLowerCase() == portVault.address.toLowerCase())?.StartApyCalculationTimestamp;
+    const apyAllTime = await portService.calculateAPRFromRate(ctx, newPortNavUpdate, portVault, startApyCalculationTimestamp, portNavUpdates);
+    portVault.apy = apyAllTime;
+
+    // APR between this NAV update and the previous one (newPortNavUpdate is
+    // already in the portNavUpdates map, so it is picked up as the latest).
+    const apyBetweenUpdates = await portService.calculateApyBetweenUpdates(ctx, portVault.address, Number(log.block.timestamp), startApyCalculationTimestamp, portNavUpdates);
+    if (apyBetweenUpdates !== null) {
+      portVault.apyBetweenUpdates = apyBetweenUpdates;
     }
 
-    const latestBlock = ctx.blocks[ctx.blocks.length - 1];
-    const lastBlockHeight = latestBlock.header.height;
+    const currentTimestamp = BigInt(log.block.timestamp);
+    const currentBlock = BigInt(log.block.height);
+    const apyId = `${portVault.id}-${currentTimestamp}-${log.transactionHash}`;
 
-    if (portVault.block > lastBlockHeight) {
-      continue;
-    }
-
-    const existingVault = await getPortVaultByAddress(ctx, portVault.address);
-
-    if (existingVault) {
-      // Mark as initialized even if it already exists in the database
-      PORT_INITIALIZED_VAULTS.set(vaultKey, true);
-      continue;
-    }
-
-    const [name, symbol, decimals, accountantState, base, isPaused, lendingInfo, depositCap] = await Promise.all([
-      readContract(ctx, portVault.address, BoringVaultAbi, 'name', [], portVault.block),
-      readContract(ctx, portVault.address, BoringVaultAbi, 'symbol', [], portVault.block),
-      readContract(ctx, portVault.address, BoringVaultAbi, 'decimals', [], portVault.block),
-      readContract(ctx, portVault.Accountant, AccountantAbi, 'accountantState', [], portVault.block),
-      readContract(ctx, portVault.Accountant, AccountantAbi, 'base', [], portVault.block),
-      readContract(ctx, portVault.Teller, TellerAbi, 'isPaused', [], portVault.block),
-      readContract(ctx, portVault.Accountant, AccountantAbi, 'lendingInfo', [], portVault.block),
-      readContract(ctx, portVault.Teller, TellerAbi, 'depositCap', [], portVault.block),
-    ]);
-
-    const baseToken = await tokensService.getTokenByAddress(ctx, base);
-
-    if (!baseToken) {
-      throwError(`Base token not found for port vault ${portVault.address}`, portVault.address);
-    }
-
-    const vault = new PortVault({
-      id: createPortVaultId(portVault.address, ctx),
-      address: portVault.address.toLowerCase(),
-      network: ctx.syncedNetwork,
-      startedAt: BigInt(latestBlock.header.timestamp),
-      totalActivity: BigInt(0),
-      name,
-      symbol,
-      decimals: Number(decimals),
-      managementFee: BigInt(accountantState._managementFee),
-      currentNav: BigInt(accountantState._exchangeRate),
-      apy: lendingInfo ? BigInt(lendingInfo._lendingRate) : BigInt(0),
-      tvl: BigInt(0),
-      avg7dApy: BigInt(0),
-      avg30dApy: BigInt(0),
-      avg1yApy: BigInt(0),
-      apyBetweenUpdates: BigInt(0),
-      riskLevel: 0,
-      totalWithdrawalRequestsInBaseToken: BigInt(0),
-      totalPendingWithdrawalRequests: BigInt(0),
-      status: isPaused ? PortVaultStatus.PAUSED : PortVaultStatus.ACTIVE,
-      assets: [baseToken.address],
-      baseToken: baseToken,
-      teller: portVault.Teller.toLowerCase(),
-      accountant: portVault.Accountant.toLowerCase(),
-      atomicQueue: portVault.AtomicQueue.toLowerCase(),
-      atomicSolver: portVault.AtomicSolver.toLowerCase(),
-      rolesAuthority: portVault.RolesAuthority.toLowerCase(),
-      manager: portVault.Manager.toLowerCase(),
-      depositCap,
-      type: PortVaultType.STANDARD,
-      fundsDiverted: BigInt(0),
+    const portVaultAPY = new PortVaultAPY({
+      id: apyId,
+      vault: portVault,
+      apy: apyAllTime,
+      timestamp: currentTimestamp,
+      block: currentBlock,
     });
-
-    const eerEnabled = portVault.expectedExchangeRateConfig !== undefined;
-
-    if (eerEnabled) {
-
-      // Use base token decimals for initial exchange rate (1.0 in base decimals)
-      const baseDec = Number(baseToken.decimals)
-      const baseDecFactor = 10n ** BigInt(baseDec)
-      const nowSec = toSec(latestBlock.header.timestamp)
-      const monthStartTs = floorToMonthUTC(nowSec)
-
-      // Expected Exchange Rate
-      // NOTE: Both shares and netAssets are event-tracked; do not read totalSupply from contract.
-      // totalSharesTracked starts at 0 and is updated ONLY via Enter (increase) and
-      // AtomicRequestFulfilled/withdrawal (decrease) events.
-      // netAssetsTrackedBaseRaw starts at 0 and is updated via:
-      // - Enter events (+deposit amount)
-      // - AtomicRequestFulfilled/withdrawal (-withdrawn amount)
-      // - Time window accrual (+interest, -fees)
-      const expectedExchangeRate = new ExpectedExchangeRate({
-        id: vault.id,
-        vault,
-        expectedLastAccrualTs: nowSec,
-        expectedLastUpdateTs: floorToHour(nowSec),
-        expectedAssetsBaseRaw: BigInt(0),
-        expectedBorrowedBaseRaw: BigInt(0),
-        expectedBorrowedPrincipalBaseRaw: BigInt(0),
-        expectedExchangeRateBaseRaw: baseDecFactor, // initial 1.0 in base token decimals (NOT WAD)
-        commitmentFeeAccruedMtdBaseRaw: BigInt(0),
-        commitmentFeeProjectedMonthEndBaseRaw: BigInt(0),
-        commitmentFeeMtdMonthStartTs: monthStartTs,
-        expectedRepaymentPendingBaseRaw: BigInt(0),
-        expectedRepaymentCreditBaseRaw: BigInt(0),
-        borrowRateBps: BigInt(portVault.expectedExchangeRateConfig?.borrowRateBps ?? 0),
-        commitmentFeeRateBps: BigInt(0),
-        totalSharesTracked: 0n,  // Start at 0, updated via Enter/RequestFulfilled events only
-        totalSharesSource: 'event_tracked',
-        netAssetsTrackedBaseRaw: 0n,  // Start at 0, updated via event deltas + time window accrual
-        idleBaseTracked: BigInt(0),  // Simplified EER tracking
-        investedBaseTracked: BigInt(0),  // Simplified EER tracking - funds deployed to strategies
-        accruedCommitmentFeeBase: BigInt(0),  // Simplified EER tracking
-        accruedBorrowInterestBase: BigInt(0),  // Simplified EER tracking
-        borrowInterestAccruedMtdBaseRaw: BigInt(0),
-        borrowInterestProjectedMonthEndBaseRaw: BigInt(0),
-        borrowInterestMtdMonthStartTs: monthStartTs,
-        lastAccrualBlock: BigInt(portVault.block),
-        strategyYieldBase: BigInt(0),
-        lastSnapshotTsUsed: 0,
-        commitFeeRemainderNumerator: BigInt(0),
-        borrowInterestRemainderNumerator: BigInt(0),
-      } as ExpectedExchangeRate)
-
-      ctx.log.info(
-        `[EVENT TRACK INIT] vault=${vault.address} totalSharesTracked=0 netAssetsTrackedBaseRaw=0 ` +
-        `source=event_tracked (bootstrapping - will track deltas from Enter/RequestFulfilled events)`
-      )
-
-      expectedExchangeRates.set(expectedExchangeRate.id, expectedExchangeRate);
-    }
-    portVaults.set(portVault.address.toLowerCase(), vault);
-
-    PORT_INITIALIZED_VAULTS.set(vaultKey, true);
-  }
-
-  return {
-    portVaults,
-    expectedExchangeRates,
-  };
-}
-
-async function getGlobalStats(ctx: ProcessorContext): Promise<PortGlobalStats> {
-  const portGlobalStats = await ctx.store.find(PortGlobalStats, { where: { network: ctx.syncedNetwork } });
-  if (!portGlobalStats.length) {
-    return new PortGlobalStats({
-      id: ctx.syncedNetwork,
-      activeUsers: BigInt(0),
-      network: ctx.syncedNetwork,
-    });
-  }
-  return portGlobalStats[0];
-}
-
-async function calculateAPRFromRate(ctx: ProcessorContext, lastNavUpdate: PortNavUpdate, vault: PortVault, startApyCalculationTimestamp?: number, portNavUpdates?: Map<string, PortNavUpdate>): Promise<bigint> {
-  const navDecimals = Math.pow(10, 18);
-  const vaultAddressLower = vault.address.toLowerCase();
-
-  const timeEnd = Number(lastNavUpdate.timestamp);
-  const timeStart = startApyCalculationTimestamp ?? Number(vault.startedAt);
-
-  // Baseline NAV at the start of the APY window: the most recent NAV update at
-  // or before timeStart. Seeded/migrated vaults launch with a rate above 1.0,
-  // so a hardcoded 1.0 baseline would wildly overstate the APR.
-  let navStartRaw = navDecimals;
-
-  const dbBaselineNavUpdates = await ctx.store.find(PortNavUpdate, {
-    where: {
-      vault: { address: vault.address, network: ctx.syncedNetwork },
-      timestamp: LessThanOrEqual(BigInt(timeStart))
-    },
-    order: { timestamp: 'DESC' },
-    take: 1
-  });
-
-  const memBaselineNavUpdates = portNavUpdates
-    ? Array.from(portNavUpdates.values())
-      .filter(update => update.vault.address.toLowerCase() === vaultAddressLower && Number(update.timestamp) <= timeStart)
-      .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))
-      .slice(0, 1)
-    : [];
-
-  const baselineNavUpdate = [...memBaselineNavUpdates, ...dbBaselineNavUpdates]
-    .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))[0];
-
-  if (baselineNavUpdate && baselineNavUpdate.newRate !== 0n) {
-    navStartRaw = Number(baselineNavUpdate.newRate);
-  } else {
-    // No update at or before the start: fall back to the rate the vault held
-    // just before its first update after the start (that update's oldRate).
-    const dbFirstNavUpdates = await ctx.store.find(PortNavUpdate, {
-      where: {
-        vault: { address: vault.address, network: ctx.syncedNetwork },
-        timestamp: MoreThanOrEqual(BigInt(timeStart))
-      },
-      order: { timestamp: 'ASC' },
-      take: 1
-    });
-
-    const memFirstNavUpdates = portNavUpdates
-      ? Array.from(portNavUpdates.values())
-        .filter(update => update.vault.address.toLowerCase() === vaultAddressLower && Number(update.timestamp) >= timeStart)
-        .sort((a, b) => Number(a.timestamp) - Number(b.timestamp))
-        .slice(0, 1)
-      : [];
-
-    const firstNavUpdate = [...memFirstNavUpdates, ...dbFirstNavUpdates]
-      .sort((a, b) => Number(a.timestamp) - Number(b.timestamp))[0];
-
-    if (firstNavUpdate && firstNavUpdate.oldRate !== 0n) {
-      navStartRaw = Number(firstNavUpdate.oldRate);
-    }
-  }
-
-  const navEndRaw = Number(lastNavUpdate.newRate);
-
-  const navStart = navStartRaw / navDecimals;
-  const navEnd = navEndRaw / navDecimals;
-
-  if (navStart === 0 || navEnd === 0) {
-    ctx.log.warn(`[APR] Vault ${vault.id}: Invalid NAV values - Start: ${navStart}, End: ${navEnd}`);
-    return BigInt(0);
-  }
-
-  const daysElapsed = (timeEnd - timeStart) / (1000 * 60 * 60 * 24);
-
-  const MIN_HOURS_FOR_APR = 1;
-  const minDaysForAPR = MIN_HOURS_FOR_APR / 24;
-
-  if (daysElapsed < minDaysForAPR) {
-    ctx.log.info(`[APR DEBUG] Vault ${vault.id}: Not enough time elapsed (${daysElapsed} < ${minDaysForAPR})`);
-    return BigInt(0); // Not enough time has passed
-  }
-
-  if (daysElapsed <= 0) {
-    ctx.log.warn(`[APR] Vault ${vault.id}: Invalid time period (${daysElapsed} days)`);
-    return BigInt(0);
-  }
-
-  const navReturn = navEnd / navStart;
-
-  const apr = (navReturn - 1) * (365 / daysElapsed);
-
-  const MAX_APR_BPS = 100000;
-  let aprBps = Math.round(apr * 10000);
-
-  if (aprBps > MAX_APR_BPS) {
-    aprBps = MAX_APR_BPS;
-    ctx.log.info(`[APR DEBUG] Vault ${vault.id}: APR capped to ${MAX_APR_BPS}`);
-  }
-
-  if (!Number.isFinite(aprBps) || Number.isNaN(aprBps)) {
-    ctx.log.warn(`[APR DEBUG] Vault ${vault.id}: Invalid aprBps=${aprBps}, returning 0`);
-    return BigInt(0);
-  }
-
-  return BigInt(aprBps);
-}
-
-async function calculateAverageAPYForPeriod(
-  ctx: ProcessorContext,
-  vaultAddress: string,
-  days: number,
-  currentTimestamp: number,
-  portVaultAPYs: Map<string, PortVaultAPY>
-): Promise<bigint> {
-  const cutoffTimestamp = currentTimestamp - (days * 24 * 60 * 60 * 1000);
-
-  // Get from DB
-  const dbRecords = await ctx.store.find(PortVaultAPY, {
-    where: {
-      vault: { address: vaultAddress, network: ctx.syncedNetwork },
-      timestamp: MoreThanOrEqual(BigInt(cutoffTimestamp))
-    },
-    order: { timestamp: 'DESC' }
-  });
-
-  // Get from in-memory map
-  const memRecords = Array.from(portVaultAPYs.values()).filter(
-    rec => rec.vault.address === vaultAddress && Number(rec.timestamp) >= cutoffTimestamp
-  );
-
-  // Combine and deduplicate by id
-  const allRecordsMap: { [id: string]: PortVaultAPY } = {};
-  for (const rec of [...dbRecords, ...memRecords]) {
-    allRecordsMap[rec.id] = rec;
-  }
-  const apyRecords = Object.values(allRecordsMap);
-
-  if (apyRecords.length === 0) {
-    return BigInt(0);
-  }
-
-  const avg = apyRecords.reduce((sum, rec) => sum + Number(rec.apy), 0) / apyRecords.length;
-  const result = BigInt(Math.round(avg));
-
-  return result;
-}
-
-/**
- * APR (in bps) between the two most recent NAV updates, annualized by the
- * actual elapsed time between them: (rateNow / ratePrev - 1) * (365 / daysBetween).
- * Returns null when there are fewer than two usable updates.
- */
-async function calculateApyBetweenUpdates(
-  ctx: ProcessorContext,
-  vaultAddress: string,
-  currentTimestamp: number,
-  startApyCalculationTimestamp?: number,
-  portNavUpdates?: Map<string, PortNavUpdate>
-): Promise<bigint | null> {
-  const navDecimals = 10n ** 18n;
-  const vaultAddressLower = vaultAddress.toLowerCase();
-
-  const dbNavUpdates = await ctx.store.find(PortNavUpdate, {
-    where: {
-      vault: { address: vaultAddress, network: ctx.syncedNetwork },
-      timestamp: LessThanOrEqual(BigInt(currentTimestamp))
-    },
-    order: { timestamp: 'DESC' },
-    take: 10
-  });
-
-  const memNavUpdates = portNavUpdates
-    ? Array.from(portNavUpdates.values())
-      .filter(update => update.vault.address.toLowerCase() === vaultAddressLower && Number(update.timestamp) <= currentTimestamp)
-    : [];
-
-  // Combine and deduplicate by id, newest first
-  const allUpdatesMap: { [id: string]: PortNavUpdate } = {};
-  for (const update of [...dbNavUpdates, ...memNavUpdates]) {
-    allUpdatesMap[update.id] = update;
-  }
-  const updates = Object.values(allUpdatesMap)
-    .sort((a, b) => Number(b.timestamp) - Number(a.timestamp));
-
-  if (updates.length < 2) {
-    return null;
-  }
-
-  const latest = updates[0];
-
-  // Only the latest update must fall after the APY calculation start; the
-  // previous update merely provides the baseline rate, so it may predate it.
-  if (startApyCalculationTimestamp !== undefined && Number(latest.timestamp) < startApyCalculationTimestamp) {
-    return null;
-  }
-
-  // Use the most recent earlier update that is at least MIN_APY_CALCULATION_ELAPSED_MS
-  // older than the latest one, so same-block / near-simultaneous updates don't
-  // produce absurd annualized values.
-  const previous = updates.find(update => Number(latest.timestamp) - Number(update.timestamp) >= MIN_APY_CALCULATION_ELAPSED_MS);
-
-  if (!previous) {
-    return null;
-  }
-
-  if (latest.newRate === 0n || previous.newRate === 0n) {
-    ctx.log.warn(`[Between-Updates APR] Invalid exchange rate (0) for vault ${vaultAddress}`);
-    return null;
-  }
-
-  const erCurrent = Number(latest.newRate) / Number(navDecimals);
-  const erPrevious = Number(previous.newRate) / Number(navDecimals);
-
-  const daysElapsed = (Number(latest.timestamp) - Number(previous.timestamp)) / (24 * 60 * 60 * 1000);
-  if (daysElapsed <= 0) {
-    return null;
-  }
-
-  const apr = (erCurrent / erPrevious - 1) * (365 / daysElapsed);
-  const aprBps = Math.round(apr * 10000);
-
-  const MAX_APR_BPS = 100000;
-  const clampedAprBps = Math.min(Math.max(aprBps, -MAX_APR_BPS), MAX_APR_BPS);
-
-  if (!Number.isFinite(clampedAprBps) || Number.isNaN(clampedAprBps)) {
-    ctx.log.warn(`[Between-Updates APR] Invalid aprBps=${aprBps} for vault ${vaultAddress}`);
-    return null;
-  }
-
-  return BigInt(clampedAprBps);
-}
-
-async function calculateRollingAPR(
-  ctx: ProcessorContext,
-  vaultAddress: string,
-  currentExchangeRate: bigint,
-  currentTimestamp: number,
-  days: number,
-  vaultStartedAt: bigint,
-  startApyCalculationTimestamp?: number,
-  portNavUpdates?: Map<string, PortNavUpdate>
-): Promise<{ apr: bigint | null; historicalER: bigint }> {
-  const navDecimals = 10n ** 18n;
-  const effectiveStart = startApyCalculationTimestamp ?? Number(vaultStartedAt);
-  const vaultAddressLower = vaultAddress.toLowerCase();
-
-  if (currentTimestamp - effectiveStart < MIN_APY_CALCULATION_ELAPSED_MS) {
-    return { apr: null, historicalER: navDecimals };
-  }
-
-  const daysAgoStart = currentTimestamp - (days * 24 * 60 * 60 * 1000);
-  const daysAgoDate = new Date(daysAgoStart);
-  daysAgoDate.setHours(23, 59, 59, 999);
-  const cutoffTimestamp = daysAgoDate.getTime();
-
-  const dbNavUpdates = (await ctx.store.find(PortNavUpdate, {
-    where: {
-      vault: { address: vaultAddress, network: ctx.syncedNetwork },
-      timestamp: LessThanOrEqual(BigInt(cutoffTimestamp))
-    },
-    order: { timestamp: 'DESC' },
-    take: 1
-  })).filter(update => Number(update.timestamp) >= effectiveStart);
-
-  const memNavUpdates = portNavUpdates
-    ? Array.from(portNavUpdates.values())
-      .filter(update => update.vault.address.toLowerCase() === vaultAddressLower && Number(update.timestamp) >= effectiveStart && Number(update.timestamp) <= cutoffTimestamp)
-      .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))
-      .slice(0, 1)
-    : [];
-
-  const navUpdates = [...memNavUpdates, ...dbNavUpdates]
-    .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))
-    .slice(0, 1);
-
-  let erPast: number;
-  let historicalER: bigint;
-  let annualizationFactor: number;
-
-  if (navUpdates.length === 0) {
-    if (startApyCalculationTimestamp !== undefined) {
-      const actualDaysElapsed = (currentTimestamp - effectiveStart) / (24 * 60 * 60 * 1000);
-      if (actualDaysElapsed < (1 / 24)) { // Less than 1 hour
-        return { apr: null, historicalER: navDecimals };
-      }
-
-      const dbBaselineNavUpdates = await ctx.store.find(PortNavUpdate, {
-        where: {
-          vault: { address: vaultAddress, network: ctx.syncedNetwork },
-          timestamp: LessThanOrEqual(BigInt(effectiveStart))
-        },
-        order: { timestamp: 'DESC' },
-        take: 1
-      });
-
-      const memBaselineNavUpdates = portNavUpdates
-        ? Array.from(portNavUpdates.values())
-          .filter(update => update.vault.address.toLowerCase() === vaultAddressLower && Number(update.timestamp) <= effectiveStart)
-          .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))
-          .slice(0, 1)
-        : [];
-
-      const baselineNavUpdate = [...memBaselineNavUpdates, ...dbBaselineNavUpdates]
-        .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))
-        .slice(0, 1)[0];
-
-      if (baselineNavUpdate && baselineNavUpdate.newRate !== 0n) {
-        erPast = Number(baselineNavUpdate.newRate) / Number(navDecimals);
-        historicalER = baselineNavUpdate.newRate;
-        annualizationFactor = 365 / actualDaysElapsed;
-      } else {
-        const dbStartNavUpdates = (await ctx.store.find(PortNavUpdate, {
-          where: {
-            vault: { address: vaultAddress, network: ctx.syncedNetwork },
-            timestamp: MoreThanOrEqual(BigInt(effectiveStart))
-          },
-          order: { timestamp: 'ASC' },
-          take: 1
-        })).filter(update => Number(update.timestamp) <= currentTimestamp);
-
-        const memStartNavUpdates = portNavUpdates
-          ? Array.from(portNavUpdates.values())
-            .filter(update => update.vault.address.toLowerCase() === vaultAddressLower && Number(update.timestamp) >= effectiveStart && Number(update.timestamp) <= currentTimestamp)
-            .sort((a, b) => Number(a.timestamp) - Number(b.timestamp))
-            .slice(0, 1)
-          : [];
-
-        const startNavUpdate = [...memStartNavUpdates, ...dbStartNavUpdates]
-          .sort((a, b) => Number(a.timestamp) - Number(b.timestamp))
-          .slice(0, 1)[0];
-
-        if (!startNavUpdate || startNavUpdate.oldRate === 0n) {
-          return { apr: null, historicalER: navDecimals };
-        }
-
-        erPast = Number(startNavUpdate.oldRate) / Number(navDecimals);
-        historicalER = startNavUpdate.oldRate;
-        annualizationFactor = 365 / actualDaysElapsed;
-      }
-    } else {
-      erPast = 1.0;
-      historicalER = navDecimals;
-      // No data at the lookback cutoff — vault is younger than the requested window.
-      // Annualize based on actual elapsed time from inception instead of the full window.
-      const actualDaysElapsed = (currentTimestamp - effectiveStart) / (24 * 60 * 60 * 1000);
-      if (actualDaysElapsed < (1 / 24)) { // Less than 1 hour
-        return { apr: null, historicalER };
-      }
-      annualizationFactor = 365 / actualDaysElapsed;
-    }
-  } else {
-    const historicalNavUpdate = navUpdates[0];
-    const historicalExchangeRate = historicalNavUpdate.newRate;
-
-    if (historicalExchangeRate === 0n) {
-      ctx.log.warn(`[Rolling APR] Invalid historical exchange rate (0) for vault ${vaultAddress}, using 1.0`);
-      erPast = 1.0;
-      historicalER = navDecimals;
-    } else {
-      erPast = Number(historicalExchangeRate) / Number(navDecimals);
-      if (erPast === 0) {
-        ctx.log.warn(`[Rolling APR] Invalid past exchange rate (0) for vault ${vaultAddress}, using 1.0`);
-        erPast = 1.0;
-        historicalER = navDecimals;
-      } else {
-        historicalER = historicalExchangeRate;
-      }
-    }
-    annualizationFactor = Math.round(365 / days);
-  }
-
-  if (currentExchangeRate === 0n) {
-    ctx.log.warn(`[Rolling APR] Invalid current exchange rate (0) for vault ${vaultAddress}`);
-    return { apr: null, historicalER };
-  }
-
-  const erCurrent = Number(currentExchangeRate) / Number(navDecimals);
-
-  const navReturn = erCurrent / erPast;
-  const apr = (navReturn - 1) * annualizationFactor;
-  const aprBps = Math.round(apr * 10000);
-
-  const MAX_APR_BPS = 100000;
-  const clampedAprBps = Math.min(Math.max(aprBps, -MAX_APR_BPS), MAX_APR_BPS);
-
-  if (!Number.isFinite(clampedAprBps) || Number.isNaN(clampedAprBps)) {
-    ctx.log.warn(`[Rolling APR] Invalid aprBps=${aprBps} for vault ${vaultAddress}`);
-    return { apr: null, historicalER };
-  }
-
-  return { apr: BigInt(clampedAprBps), historicalER };
-}
-
-async function calculateRollingAprSeries(
-  ctx: ProcessorContext,
-  vault: PortVault,
-  currentExchangeRate: bigint,
-  timestamp: number,
-  startApyCalculationTimestamp?: number,
-  portNavUpdates?: Map<string, PortNavUpdate>
-) {
-  const [result7d, result14d, result30d, result365d] = await Promise.all([
-    calculateRollingAPR(ctx, vault.address, currentExchangeRate, timestamp, 7, vault.startedAt, startApyCalculationTimestamp, portNavUpdates),
-    calculateRollingAPR(ctx, vault.address, currentExchangeRate, timestamp, 14, vault.startedAt, startApyCalculationTimestamp, portNavUpdates),
-    calculateRollingAPR(ctx, vault.address, currentExchangeRate, timestamp, 30, vault.startedAt, startApyCalculationTimestamp, portNavUpdates),
-    calculateRollingAPR(ctx, vault.address, currentExchangeRate, timestamp, 365, vault.startedAt, startApyCalculationTimestamp, portNavUpdates),
-  ]);
-
-  return {
-    result7d,
-    result14d,
-    result30d,
-    result365d,
-    hasAnyApr:
-      result7d.apr !== null ||
-      result14d.apr !== null ||
-      result30d.apr !== null ||
-      result365d.apr !== null,
-  };
-}
-
-async function getOrCreateDailyChartEntry(
-  ctx: ProcessorContext,
-  vault: PortVault,
-  currentExchangeRate: bigint,
-  currentTimestamp: number,
-  currentBlock: bigint,
-  portVaultApyCharts: Map<string, PortVaultApyChart>,
-  startApyCalculationTimestamp?: number,
-  portNavUpdates?: Map<string, PortNavUpdate>
-): Promise<PortVaultApyChart | null> {
-  const currentDate = new Date(currentTimestamp);
-  currentDate.setHours(23, 59, 59, 999);
-  const currentDayEnd = currentDate.getTime();
-  const currentDayStart = currentDayEnd - (24 * 60 * 60 * 1000) + 1;
-
-  await prunePortVaultApyChartsBeforeStart(
-    ctx,
-    vault,
-    portVaultApyCharts,
-    startApyCalculationTimestamp
-  );
-
-  if (isBeforeApyCalculationStart(currentTimestamp, startApyCalculationTimestamp)) {
-    return null;
-  }
-
-  // Backfill missing days between last entry and current day (during historical sync)
-  const recentCharts = await ctx.store.find(PortVaultApyChart, {
-    where: {
-      vault: { address: vault.address, network: ctx.syncedNetwork },
-    },
-    order: { timestamp: 'DESC' },
-    take: 1
-  });
-
-  const memRecentCharts = Array.from(portVaultApyCharts.values())
-    .filter(chart => chart.vault?.address === vault.address)
-    .sort((a, b) => Number(b.timestamp) - Number(a.timestamp));
-
-  const lastChart = memRecentCharts.length > 0 
-    ? memRecentCharts[0] 
-    : (recentCharts.length > 0 ? recentCharts[0] : null);
-
-  if (lastChart) {
-    const lastDate = new Date(Number(lastChart.timestamp));
-    lastDate.setHours(23, 59, 59, 999);
-    const lastDayEnd = lastDate.getTime();
-
-    // Backfill missing days between last entry and current day
-    if (lastDayEnd < currentDayEnd) {
-      let dayToBackfill = lastDayEnd + (24 * 60 * 60 * 1000); // Start from day after last entry
-      
-      while (dayToBackfill < currentDayEnd) {
-        if (isBeforeApyCalculationStart(dayToBackfill, startApyCalculationTimestamp)) {
-          dayToBackfill += (24 * 60 * 60 * 1000);
-          continue;
-        }
-
-        const dayStart = dayToBackfill - (24 * 60 * 60 * 1000) + 1;
-        
-        // Check if we already have an entry for this day
-        const existingForDay = await ctx.store.find(PortVaultApyChart, {
-          where: {
-            vault: { address: vault.address, network: ctx.syncedNetwork },
-            timestamp: MoreThanOrEqual(BigInt(dayStart)),
-          },
-          order: { timestamp: 'ASC' },
-          take: 1
-        });
-
-        const memForDay = Array.from(portVaultApyCharts.values()).filter(
-          chart => chart.vault?.address === vault.address && 
-                   Number(chart.timestamp) >= dayStart && 
-                   Number(chart.timestamp) <= dayToBackfill
-        );
-
-        // If no entry exists for this day, create one
-        if (existingForDay.length === 0 && memForDay.length === 0) {
-          // Find the most recent NAV update before or on this day
-          const navForDay = await ctx.store.find(PortNavUpdate, {
-            where: {
-              vault: { address: vault.address, network: ctx.syncedNetwork },
-              timestamp: LessThanOrEqual(BigInt(dayToBackfill)),
-            },
-            order: { timestamp: 'DESC' },
-            take: 1
-          });
-
-          if (navForDay.length > 0) {
-            const navUpdate = navForDay[0];
-            if (isBeforeApyCalculationStart(Number(navUpdate.timestamp), startApyCalculationTimestamp)) {
-              dayToBackfill += (24 * 60 * 60 * 1000);
-              continue;
-            }
-
-            const exchangeRateForDay = navUpdate.newRate;
-            // Use the NAV that was valid at the end of this day for calculation
-            const { result7d, result14d, result30d, result365d, hasAnyApr } =
-              await calculateRollingAprSeries(
-                ctx,
-                vault,
-                exchangeRateForDay,
-                dayToBackfill,
-                startApyCalculationTimestamp,
-                portNavUpdates
-              );
-
-            if (hasAnyApr) {
-              const chartId = `${vault.id}-${dayToBackfill}`;
-              const portVaultApyChart = new PortVaultApyChart({
-                id: chartId,
-                vault: vault,
-                apy7d: result7d.apr ?? BigInt(0),
-                apy14d: result14d.apr ?? BigInt(0),
-                apy30d: result30d.apr ?? BigInt(0),
-                apy365d: result365d.apr ?? BigInt(0),
-                timestamp: BigInt(dayToBackfill), // Store at end of day (23:59:59)
-                block: navUpdate.block,
-                exchangeRate: exchangeRateForDay,
-                exchangeRate7dAgo: result7d.historicalER,
-                exchangeRate14dAgo: result14d.historicalER,
-                exchangeRate30dAgo: result30d.historicalER,
-                exchangeRate365dAgo: result365d.historicalER,
-              });
-              portVaultApyCharts.set(chartId, portVaultApyChart);
-            }
-          }
-        }
-
-        dayToBackfill += (24 * 60 * 60 * 1000); // Move to next day
-      }
-    }
-  }
-
-  // Check if we already have an entry for today (in memory or database)
-  const memEntryToday = Array.from(portVaultApyCharts.values()).find(
-    chart => chart.vault?.address === vault.address && 
-             Number(chart.timestamp) >= currentDayStart && 
-             Number(chart.timestamp) <= currentDayEnd
-  );
-
-  if (memEntryToday) {
-    // Update existing entry with new values, but keep timestamp at end of day
-    // Use currentDayEnd (23:59:59) for calculation, not currentTimestamp
-    const { result7d, result14d, result30d, result365d, hasAnyApr } =
-      await calculateRollingAprSeries(
-        ctx,
-        vault,
-        currentExchangeRate,
-        currentDayEnd,
-        startApyCalculationTimestamp,
-        portNavUpdates
-      );
-
-    if (hasAnyApr) {
-      memEntryToday.apy7d = result7d.apr ?? BigInt(0);
-      memEntryToday.apy14d = result14d.apr ?? BigInt(0);
-      memEntryToday.apy30d = result30d.apr ?? BigInt(0);
-      memEntryToday.apy365d = result365d.apr ?? BigInt(0);
-      memEntryToday.exchangeRate = currentExchangeRate;
-      memEntryToday.exchangeRate7dAgo = result7d.historicalER;
-      memEntryToday.exchangeRate14dAgo = result14d.historicalER;
-      memEntryToday.exchangeRate30dAgo = result30d.historicalER;
-      memEntryToday.exchangeRate365dAgo = result365d.historicalER;
-      memEntryToday.block = currentBlock;
-      // Always store timestamp at end of day (23:59:59) for consistency
-      memEntryToday.timestamp = BigInt(currentDayEnd);
-      return memEntryToday;
-    }
-    return null;
-  }
-
-  // Check database
-  const dbEntryToday = await ctx.store.find(PortVaultApyChart, {
-    where: {
-      vault: { address: vault.address, network: ctx.syncedNetwork },
-      timestamp: MoreThanOrEqual(BigInt(currentDayStart)),
-    },
-    relations: { vault: true },
-    order: { timestamp: 'ASC' },
-    take: 1
-  });
-
-  if (dbEntryToday.length > 0 && Number(dbEntryToday[0].timestamp) <= currentDayEnd) {
-    // Update existing entry from database, but keep timestamp at end of day
-    const existingEntry = dbEntryToday[0];
-    // Use currentDayEnd (23:59:59) for calculation, not currentTimestamp
-    const { result7d, result14d, result30d, result365d, hasAnyApr } =
-      await calculateRollingAprSeries(
-        ctx,
-        vault,
-        currentExchangeRate,
-        currentDayEnd,
-        startApyCalculationTimestamp,
-        portNavUpdates
-      );
-
-    if (hasAnyApr) {
-      existingEntry.apy7d = result7d.apr ?? BigInt(0);
-      existingEntry.apy14d = result14d.apr ?? BigInt(0);
-      existingEntry.apy30d = result30d.apr ?? BigInt(0);
-      existingEntry.apy365d = result365d.apr ?? BigInt(0);
-      existingEntry.exchangeRate = currentExchangeRate;
-      existingEntry.exchangeRate7dAgo = result7d.historicalER;
-      existingEntry.exchangeRate14dAgo = result14d.historicalER;
-      existingEntry.exchangeRate30dAgo = result30d.historicalER;
-      existingEntry.exchangeRate365dAgo = result365d.historicalER;
-      existingEntry.block = currentBlock;
-      // Always store timestamp at end of day (23:59:59) for consistency
-      existingEntry.timestamp = BigInt(currentDayEnd);
-      portVaultApyCharts.set(existingEntry.id, existingEntry);
-      return existingEntry;
-    }
-    return null;
-  }
-
-  // Create new entry for today at end of day (23:59:59)
-  // Use currentDayEnd (23:59:59) for calculation, not currentTimestamp
-  const { result7d, result14d, result30d, result365d, hasAnyApr } =
-    await calculateRollingAprSeries(
+    portVaultAPYs.set(apyId, portVaultAPY);
+
+    const currentExchangeRate = BigInt(newRate);
+    const currentTimestampNum = Number(log.block.timestamp);
+    
+    await portService.getOrCreateDailyChartEntry(
       ctx,
-      vault,
+      portVault,
       currentExchangeRate,
-      currentDayEnd,
+      currentTimestampNum,
+      currentBlock,
+      portVaultApyCharts,
       startApyCalculationTimestamp,
       portNavUpdates
     );
-
-  if (hasAnyApr) {
-    const chartId = `${vault.id}-${currentDayEnd}`;
-    const portVaultApyChart = new PortVaultApyChart({
-      id: chartId,
-      vault: vault,
-      apy7d: result7d.apr ?? BigInt(0),
-      apy14d: result14d.apr ?? BigInt(0),
-      apy30d: result30d.apr ?? BigInt(0),
-      apy365d: result365d.apr ?? BigInt(0),
-      timestamp: BigInt(currentDayEnd), // Always store at end of day (23:59:59)
-      block: currentBlock,
-      exchangeRate: currentExchangeRate,
-      exchangeRate7dAgo: result7d.historicalER,
-      exchangeRate14dAgo: result14d.historicalER,
-      exchangeRate30dAgo: result30d.historicalER,
-      exchangeRate365dAgo: result365d.historicalER,
-    });
-    portVaultApyCharts.set(chartId, portVaultApyChart);
-    return portVaultApyChart;
   }
 
-  return null;
-}
-
-async function updateAllVaultAPY(ctx: ProcessorContext, portVaults: Map<string, PortVault>, portVaultAPYs: Map<string, PortVaultAPY>, config: Config): Promise<{ portVaults: Map<string, PortVault>, portVaultAPYs: Map<string, PortVaultAPY> }> {
-  const currentBlockTimestamp = ctx.blocks[ctx.blocks.length - 1].header.timestamp;
-  const currentTime = new Date(currentBlockTimestamp);
-  const isSynced = ctx.isHead && ctx.blocks.length === 1;
-
-  if (!isSynced) {
-    return { portVaults, portVaultAPYs };
+  // Calculate average APY for 7, 30, and 365 days when synced
+  if (isSynced) {
+    const avg7dApy = await portService.calculateAverageAPYForPeriod(ctx, portVault.address, 7, Number(log.block.timestamp), portVaultAPYs);
+    const avg30dApy = await portService.calculateAverageAPYForPeriod(ctx, portVault.address, 30, Number(log.block.timestamp), portVaultAPYs);
+    const avg1yApy = await portService.calculateAverageAPYForPeriod(ctx, portVault.address, 365, Number(log.block.timestamp), portVaultAPYs);
+    portVault.avg7dApy = avg7dApy;
+    portVault.avg30dApy = avg30dApy;
+    portVault.avg1yApy = avg1yApy;
   }
 
-  const timeSinceLastUpdate = LAST_AVG_APY_UPDATE ?
-    (currentTime.getTime() - LAST_AVG_APY_UPDATE.getTime()) : null;
-  const shouldUpdateAvgAPY = !LAST_AVG_APY_UPDATE ||
-    (timeSinceLastUpdate && timeSinceLastUpdate >= AVG_APY_UPDATE_INTERVAL);
+  portVaults.set(portVaultAddress.toLowerCase(), portVault);
 
-  if (!shouldUpdateAvgAPY) {
-    return { portVaults, portVaultAPYs };
-  }
-
-  LAST_AVG_APY_UPDATE = currentTime;
-
-  const vaultAddresses = Array.from(portVaults.keys());
-  const allPortVaults = await ctx.store.find(PortVault, { where: { address: Not(In(vaultAddresses)), network: ctx.syncedNetwork }, relations: { baseToken: true } });
-  const allPortVaultsMap = toEntityMap(allPortVaults, 'address');
-  portVaults = new Map([...portVaults, ...allPortVaultsMap]);
-
-  let errorCount = 0;
-
-  for (const portVault of portVaults.values()) {
-    try {
-      // Only calculate average APY (main APY is handled in parseNavUpdate)
-      const avg7dApy = await calculateAverageAPYForPeriod(ctx, portVault.address, 7, currentBlockTimestamp, portVaultAPYs);
-      const avg30dApy = await calculateAverageAPYForPeriod(ctx, portVault.address, 30, currentBlockTimestamp, portVaultAPYs);
-      const avg1yApy = await calculateAverageAPYForPeriod(ctx, portVault.address, 365, currentBlockTimestamp, portVaultAPYs);
-      portVault.avg7dApy = avg7dApy;
-      portVault.avg30dApy = avg30dApy;
-      portVault.avg1yApy = avg1yApy;
-
-      // Daily catch-up for the between-updates APR (primary updates happen in parseNavUpdate)
-      if (portVault.type === PortVaultType.STANDARD) {
-        const startApyCalculationTimestamp = config.Port?.Vaults?.find((v) => v.address.toLowerCase() == portVault.address.toLowerCase())?.StartApyCalculationTimestamp;
-        const apyBetweenUpdates = await calculateApyBetweenUpdates(ctx, portVault.address, currentBlockTimestamp, startApyCalculationTimestamp);
-        if (apyBetweenUpdates !== null) {
-          portVault.apyBetweenUpdates = apyBetweenUpdates;
-        }
-      }
-
-      portVaults.set(portVault.address.toLowerCase(), portVault);
-    } catch (error) {
-      ctx.log.error(`[APY] ❌ Failed to calculate daily average APY for vault ${portVault.id}: ${error}`);
-      errorCount++;
-    }
-  }
-
-  return { portVaults, portVaultAPYs };
-}
-
-async function updateAllVaultApyCharts(
-  ctx: ProcessorContext,
-  portVaults: Map<string, PortVault>,
-  portVaultApyCharts: Map<string, PortVaultApyChart>,
-  config: Config
-): Promise<{ portVaults: Map<string, PortVault>, portVaultApyCharts: Map<string, PortVaultApyChart> }> {
-  const currentBlockTimestamp = ctx.blocks[ctx.blocks.length - 1].header.timestamp;
-  const currentTime = new Date(currentBlockTimestamp);
-  const isSynced = ctx.isHead && ctx.blocks.length === 1;
-
-  if (!isSynced) {
-    return { portVaults, portVaultApyCharts };
-  }
-
-  // Check if we've crossed into a new day
-  const currentDayEnd = new Date(currentTime);
-  currentDayEnd.setHours(23, 59, 59, 999);
-  const yesterdayEnd = currentDayEnd.getTime() - (24 * 60 * 60 * 1000);
-  const yesterdayStart = yesterdayEnd - (24 * 60 * 60 * 1000) + 1;
-
-  // Only run if we're in a new day (at least 1 second past midnight)
-  const currentDayStart = new Date(currentTime);
-  currentDayStart.setHours(0, 0, 0, 0);
-  const secondsSinceMidnight = (currentTime.getTime() - currentDayStart.getTime()) / 1000;
-  if (secondsSinceMidnight < 1) {
-    return { portVaults, portVaultApyCharts };
-  }
-
-  const lastUpdateDay = LAST_APY_CHART_UPDATE ? new Date(LAST_APY_CHART_UPDATE.getTime()) : null;
-  lastUpdateDay?.setHours(23, 59, 59, 999);
-  
-  if (lastUpdateDay && lastUpdateDay.getTime() >= currentDayEnd.getTime()) {
-    // Already ran today
-    return { portVaults, portVaultApyCharts };
-  }
-
-  LAST_APY_CHART_UPDATE = currentTime;
-
-  const vaultAddresses = Array.from(portVaults.keys());
-  const allPortVaults = await ctx.store.find(PortVault, { 
-    where: { address: Not(In(vaultAddresses)), network: ctx.syncedNetwork }, 
-    relations: { baseToken: true } 
+  const portVaultActivity = new PortVaultActivity({
+    id: `${PortVaultAction.NAV_UPDATE}-${portVaultAddress}-${log.transactionHash}`,
+    vault: portVault,
+    action: PortVaultAction.NAV_UPDATE,
+    details: `NAV updated from $${Number((Number(oldRate) / (10 ** Number(18))).toPrecision(6))} to $${Number((Number(newRate) / (10 ** Number(18))).toPrecision(6))}`,
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
   });
-  const allPortVaultsMap = toEntityMap(allPortVaults, 'address');
-  portVaults = new Map([...portVaults, ...allPortVaultsMap]);
 
-  let errorCount = 0;
+  portVaultActivities.set(portVaultActivity.id, portVaultActivity);
 
-  for (const portVault of portVaults.values()) {
-    try {
-      // Only calculate for STANDARD vaults
-      if (portVault.type !== PortVaultType.STANDARD) {
-        continue;
-      }
-
-      const startApyCalculationTimestamp = config.Port?.Vaults?.find((v) => v.address.toLowerCase() == portVault.address.toLowerCase())?.StartApyCalculationTimestamp;
-      await prunePortVaultApyChartsBeforeStart(
-        ctx,
-        portVault,
-        portVaultApyCharts,
-        startApyCalculationTimestamp
-      );
-      if (isBeforeApyCalculationStart(yesterdayEnd, startApyCalculationTimestamp)) {
-        continue;
-      }
-
-      // Check if yesterday already has a chart entry (from NAV updates)
-      const yesterdayDayStart = yesterdayEnd - (24 * 60 * 60 * 1000) + 1;
-      const memEntryYesterday = Array.from(portVaultApyCharts.values()).find(
-        chart => chart.vault?.address === portVault.address && 
-                 Number(chart.timestamp) >= yesterdayDayStart && 
-                 Number(chart.timestamp) <= yesterdayEnd
-      );
-
-      if (memEntryYesterday) {
-        // Yesterday already has an entry from NAV updates, skip
-        continue;
-      }
-
-      const dbEntryYesterday = await ctx.store.find(PortVaultApyChart, {
-        where: {
-          vault: { address: portVault.address, network: ctx.syncedNetwork },
-          timestamp: MoreThanOrEqual(BigInt(yesterdayDayStart)),
-        },
-        order: { timestamp: 'ASC' },
-        take: 1
-      });
-
-      if (dbEntryYesterday.length > 0 && Number(dbEntryYesterday[0].timestamp) <= yesterdayEnd) {
-        // Yesterday already has an entry, skip
-        continue;
-      }
-
-      // Yesterday doesn't have an entry, create one using the most recent NAV update
-      const navBeforeYesterday = await ctx.store.find(PortNavUpdate, {
-        where: {
-          vault: { address: portVault.address, network: ctx.syncedNetwork },
-          timestamp: LessThanOrEqual(BigInt(yesterdayEnd)),
-        },
-        order: { timestamp: 'DESC' },
-        take: 1
-      });
-
-      if (navBeforeYesterday.length === 0) {
-        continue;
-      }
-
-      const navUpdate = navBeforeYesterday[0];
-      if (isBeforeApyCalculationStart(Number(navUpdate.timestamp), startApyCalculationTimestamp)) {
-        continue;
-      }
-
-      // Use current NAV from vault entity as the exchange rate for yesterday
-      const exchangeRateForYesterday = portVault.currentNav;
-
-      // Use current NAV for APR calculation
-      // This calculates APR as of yesterday by comparing current rate to 7/14/30/365 days before yesterday
-      const { result7d, result14d, result30d, result365d, hasAnyApr } =
-        await calculateRollingAprSeries(
-          ctx,
-          portVault,
-          exchangeRateForYesterday,
-          yesterdayEnd,
-          startApyCalculationTimestamp
-        );
-
-      if (hasAnyApr) {
-        const chartId = `${portVault.id}-${yesterdayEnd}`;
-        const portVaultApyChart = new PortVaultApyChart({
-          id: chartId,
-          vault: portVault,
-          apy7d: result7d.apr ?? BigInt(0),
-          apy14d: result14d.apr ?? BigInt(0),
-          apy30d: result30d.apr ?? BigInt(0),
-          apy365d: result365d.apr ?? BigInt(0),
-          timestamp: BigInt(yesterdayEnd), // Store at end of day (23:59:59)
-          block: navUpdate.block,
-          exchangeRate: exchangeRateForYesterday,
-          exchangeRate7dAgo: result7d.historicalER,
-          exchangeRate14dAgo: result14d.historicalER,
-          exchangeRate30dAgo: result30d.historicalER,
-          exchangeRate365dAgo: result365d.historicalER,
-        });
-        portVaultApyCharts.set(chartId, portVaultApyChart);
-      }
-    } catch (error) {
-      ctx.log.error(`[APY Chart] ❌ Failed to calculate daily rolling APY chart for vault ${portVault.id}: ${error}`);
-      errorCount++;
-    }
-  }
-
-  return { portVaults, portVaultApyCharts };
+  return { portNavUpdates, portVaults, portVaultActivities, portVaultAPYs, portVaultApyCharts };
 }
 
-async function updateExpiredWithdrawalRequests(ctx: ProcessorContext, portWithdrawalRequests: Map<string, PortWithdrawalRequest>, portVaults: Map<string, PortVault>): Promise<{ portWithdrawalRequests: Map<string, PortWithdrawalRequest>, portVaults: Map<string, PortVault> }> {
-  const isSynced = ctx.isHead && ctx.blocks.length === 1;
-  const currentTimestamp = BigInt(ctx.blocks[ctx.blocks.length - 1].header.timestamp);
+async function parseAssetAdded(ctx: ProcessorContext, log: Log, config: Config, portVaults: Map<string, PortVault>): Promise<{ portVaults: Map<string, PortVault> }> {
+  const tellerAddress = log.address;
+  const { asset } = TellerAbi.events.AssetAdded.decode(log);
 
-  if (!isSynced || portVaults.size >= 1 || portWithdrawalRequests.size >= 1) {
-    return { portWithdrawalRequests, portVaults };
+  const portVaultAddress = config.Port?.Vaults?.find((vault) => vault.Teller.toLowerCase() == tellerAddress.toLowerCase())?.address;
+
+  if (!portVaultAddress) {
+    throwError(`Port vault address not found - parseAssetAdded failed.`, log.transactionHash);
   }
 
-  const expiredWithdrawalRequests = await ctx.store.find(PortWithdrawalRequest, { where: { status: PortWithdrawalRequestStatus.PENDING, deadline: LessThan(currentTimestamp), vault: { network: ctx.syncedNetwork } }, relations: { vault: true } });
+  const portVault = portVaults.get(portVaultAddress.toLowerCase()) ?? await portService.getPortVaultByAddress(ctx, portVaultAddress);
 
-  for (const withdrawalRequest of expiredWithdrawalRequests) {
-    const portVault = portVaults.get(withdrawalRequest.vault.address) ?? await getPortVaultByAddress(ctx, withdrawalRequest.vault.address);
-    if (!portVault) {
-      continue;
-    }
-
-    withdrawalRequest.status = PortWithdrawalRequestStatus.EXPIRED;
-    portWithdrawalRequests.set(withdrawalRequest.id, withdrawalRequest);
-
-    portVault.totalPendingWithdrawalRequests = portVault.totalPendingWithdrawalRequests - BigInt(1);
-    portVault.totalWithdrawalRequestsInBaseToken = portVault.totalWithdrawalRequestsInBaseToken - withdrawalRequest.offerAmount;
-    portVaults.set(portVault.address.toLowerCase(), portVault);
+  if (!portVault) {
+    throwError(`Port vault not found - parseAssetAdded failed.`, log.transactionHash);
   }
 
-  return { portWithdrawalRequests, portVaults };
-}
-
-async function calculateVaultTvlAtBlock(
-  ctx: ProcessorContext,
-  portVault: PortVault,
-  blockHeight: number
-): Promise<bigint> {
-  const updatedNav = await readContract(ctx, portVault.accountant, AccountantAbi, 'getRate', [], blockHeight);
-  const navInBaseToken = convertToBaseTokenAmount(BigInt(updatedNav), BigInt(portVault.baseToken.decimals), BigInt(18));
-  const totalSupply = await readContract(ctx, portVault.address, BoringVaultAbi, 'totalSupply', [], blockHeight);
-  let tvl = (totalSupply * navInBaseToken) / BigInt(10 ** portVault.decimals);
-
-  const baseToken = await tokensService.getTokenByAddress(ctx, portVault.baseToken.address);
-  if (baseToken) {
-    const priceInBN = calculateUsdPriceInBN(BigInt(10 ** Number(baseToken.decimals)), baseToken.price, BigInt(baseToken.decimals));
-    tvl = (tvl * priceInBN) / BigInt(10 ** Number(baseToken.decimals));
-  } else {
-    throwError(`Base token not found - calculateVaultTvlAtBlock failed.`, portVault.id);
-  }
-
-  return tvl;
-}
-
-async function updateAllVaultTvl(ctx: ProcessorContext, portVaults: Map<string, PortVault>, config: Config): Promise<{ portVaults: Map<string, PortVault> }> {
-  const isSynced = ctx.isHead && ctx.blocks.length === 1;
-
-  if (!isSynced) {
-    return { portVaults };
-  }
-
-  const vaultsDB = await ctx.store.find(PortVault, { where: { address: Not(In(Array.from(portVaults.keys()))), network: ctx.syncedNetwork }, relations: { baseToken: true } });
-  const vaultsDBMap = toEntityMap(vaultsDB, 'address');
-  portVaults = new Map([...portVaults, ...vaultsDBMap]);
-
-  for (const portVault of portVaults.values()) {
-    const updatedNav = await readContract(ctx, portVault.accountant, AccountantAbi, 'getRate', [], ctx.blocks[ctx.blocks.length - 1].header.height);
-    portVault.currentNav = updatedNav;
-
-    if (portVault.type === PortVaultType.STANDARD) {
-      const startApyCalculationTimestamp = config.Port?.Vaults?.find((vault) => vault.address.toLowerCase() == portVault.address.toLowerCase())?.StartApyCalculationTimestamp;
-      portVault.apy = await calculateAPRFromRate(ctx, new PortNavUpdate({
-        id: `${portVault.address}-${updatedNav}-${ctx.blocks[ctx.blocks.length - 1].header.height}`,
-        vault: portVault,
-        newRate: BigInt(updatedNav),
-        oldRate: BigInt(updatedNav),
-        timestamp: BigInt(ctx.blocks[ctx.blocks.length - 1].header.timestamp),
-      }), portVault, startApyCalculationTimestamp);
-    }
-
-    portVault.tvl = await calculateVaultTvlAtBlock(ctx, portVault, ctx.blocks[ctx.blocks.length - 1].header.height);
-    portVaults.set(portVault.address.toLowerCase(), portVault);
+  if (!portVault.assets.includes(asset)) {
+    portVault.assets.push(asset);
+    portVaults.set(portVaultAddress.toLowerCase(), portVault);
   }
 
   return { portVaults };
 }
 
-function createPortVaultId(address: string, ctx: ProcessorContext): string {
-  return `${address.toLowerCase()}-${ctx.syncedNetwork}`;
+async function parseAssetRemoved(ctx: ProcessorContext, log: Log, config: Config, portVaults: Map<string, PortVault>): Promise<{ portVaults: Map<string, PortVault> }> {
+  const tellerAddress = log.address;
+  const { asset: assetAddressToRemove } = TellerAbi.events.AssetRemoved.decode(log);
+
+  const portVaultAddress = config.Port?.Vaults?.find((vault) => vault.Teller.toLowerCase() == tellerAddress.toLowerCase())?.address;
+
+  if (!portVaultAddress) {
+    throwError(`Port vault address not found - parseAssetRemoved failed.`, log.transactionHash);
+  }
+
+  const portVault = portVaults.get(portVaultAddress.toLowerCase()) ?? await portService.getPortVaultByAddress(ctx, portVaultAddress);
+
+  if (!portVault) {
+    throwError(`Port vault not found - parseAssetRemoved failed.`, log.transactionHash);
+  }
+
+  portVault.assets = portVault.assets.filter((asset) => asset !== assetAddressToRemove);
+  portVaults.set(portVaultAddress.toLowerCase(), portVault);
+
+  return { portVaults };
 }
 
-export const portService = {
-  initializePort,
-  updateAllVaultAPY,
-  updateAllVaultApyCharts,
-  updateExpiredWithdrawalRequests,
-  updateAllVaultTvl,
-  createPortVaultId,
-  getGlobalStats,
-  getPortVaultByAddress,
-  calculateAPRFromRate,
-  calculateAverageAPYForPeriod,
-  calculateApyBetweenUpdates,
-  calculateRollingAPR,
-  calculateVaultTvlAtBlock,
-  getOrCreateDailyChartEntry,
+async function parseAtomicRequestFulfilled(
+  ctx: ProcessorContext,
+  log: Log,
+  config: Config,
+  portRequestFulfilleds: Map<string, PortRequestFulfilled>,
+  portWithdrawalRequests: Map<string, PortWithdrawalRequest>,
+  users: Map<string, User>,
+  portVaults: Map<string, PortVault>,
+  portVaultTransactionHistories: Map<string, PortVaultTransactionHistory>
+): Promise<{
+  portRequestFulfilleds: Map<string, PortRequestFulfilled>,
+  portWithdrawalRequests: Map<string, PortWithdrawalRequest>,
+  users: Map<string, User>,
+  portVaults: Map<string, PortVault>,
+  portVaultTransactionHistories: Map<string, PortVaultTransactionHistory>
+}> {
+  const {
+    user: userAddress,
+    wantToken: asset,
+    offerToken: vaultAddress,
+    offerAmountSpent,
+    wantAmountReceived,
+    timestamp: timestampSec,
+  } = AtomicQueueAbi.events.AtomicRequestFulfilled.decode(log);
+
+  const timestamp = BigInt(timestampSec) * BigInt(1000);
+
+  const portVault = portVaults.get(vaultAddress.toLowerCase()) ?? await portService.getPortVaultByAddress(ctx, vaultAddress);
+
+  if (!portVault) {
+    throwError(`Port vault not found - parseAtomicRequestFulfilled failed.`, log.transactionHash);
+  }
+
+  const userId = userService.getUserId(userAddress, ctx.syncedNetwork);
+
+  const existingPortWithdrawalRequest = Array.from(portWithdrawalRequests.values()).find(r => r.vault.address == vaultAddress && r.user.id == userId && r.status == PortWithdrawalRequestStatus.PENDING) ?? await ctx.store.findOne(PortWithdrawalRequest, { where: { id: Not(In(Array.from(portWithdrawalRequests.keys()))), vault: { address: vaultAddress, network: ctx.syncedNetwork }, user: { id: userId }, status: PortWithdrawalRequestStatus.PENDING }, relations: { vault: true, user: true } });
+
+  if (!existingPortWithdrawalRequest) {
+    throwError(`Port withdrawal request not found - parseAtomicRequestFulfilled failed.`, log.transactionHash);
+  }
+
+  const user = users.get(userId) ?? await userService.getUserById(ctx, userId);
+
+  if (!user) {
+    throwError(`User not found - parseAtomicRequestFulfilled failed.`, log.transactionHash);
+  }
+
+  const token = await tokensService.getTokenByAddress(ctx, asset);
+
+  if (!token) {
+    throwError(`Token not found - parseAtomicRequestFulfilled failed.`, log.transactionHash);
+  }
+
+  existingPortWithdrawalRequest.status = PortWithdrawalRequestStatus.COMPLETED;
+
+  portWithdrawalRequests.set(existingPortWithdrawalRequest.id, existingPortWithdrawalRequest);
+
+  const portRequestFulfilled = new PortRequestFulfilled({
+    id: `${existingPortWithdrawalRequest.id}`,
+    vault: portVault,
+    user,
+    offerAmountSpent: offerAmountSpent,
+    wantToken: token,
+    wantAmountReceived: wantAmountReceived,
+    txHash: log.transactionHash,
+    timestamp: BigInt(timestamp),
+    block: BigInt(log.block.height),
+  });
+
+  portRequestFulfilleds.set(portRequestFulfilled.id, portRequestFulfilled);
+
+  const portVaultTransactionHistory = new PortVaultTransactionHistory({
+    id: `${portRequestFulfilled.id}-${PortVaultTxAction.WITHDRAWAL_REQUEST_PROCESSED}`,
+    vault: portVault,
+    user,
+    asset: token.address,
+    amount: wantAmountReceived,
+    action: PortVaultTxAction.WITHDRAWAL_REQUEST_PROCESSED,
+    timestamp: BigInt(timestamp),
+    txHash: log.transactionHash,
+  });
+
+  portVault.totalPendingWithdrawalRequests = portVault.totalPendingWithdrawalRequests - BigInt(1);
+  portVault.totalWithdrawalRequestsInBaseToken = portVault.totalWithdrawalRequestsInBaseToken - offerAmountSpent;
+  portVaults.set(portVault.address.toLowerCase(), portVault);
+
+  portVaultTransactionHistories.set(portVaultTransactionHistory.id, portVaultTransactionHistory);
+
+  // ============================================================================
+  // EER: ONE CALL ONLY - record event to inbox
+  // ============================================================================
+  const ts = toSec(log.block.timestamp);
+  ctx.log.info(
+    `[EER PARSER] kind=ATOMIC_REQUEST_FULFILLED vault=${portVault.address} vaultId=${portVault.id} ` +
+    `block=${log.block.height} ts=${ts} tx=${log.transactionHash} idx=${log.logIndex} ` +
+    `offerToken=${vaultAddress.toLowerCase()} wantToken=${asset.toLowerCase()} ` +
+    `offerAmountSpent=${offerAmountSpent.toString()} wantAmountReceived=${wantAmountReceived.toString()}`
+  );
+  await eerService.recordAtomicRequestFulfilledEvent(ctx, portVault, log, config);
+
+  return { portRequestFulfilleds, portWithdrawalRequests, users, portVaults, portVaultTransactionHistories };
+}
+
+async function parseLendingRateUpdated(ctx: ProcessorContext, log: Log, config: Config, portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>, portVaultAPYs: Map<string, PortVaultAPY>): Promise<{ portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>, portVaultAPYs: Map<string, PortVaultAPY> }> {
+  const accountantAddress = log.address;
+
+  const portVaultAddress = config.Port?.Vaults?.find((vault) => vault.Accountant.toLowerCase() == accountantAddress.toLowerCase())?.address;
+
+  if (!portVaultAddress) {
+    throwError(`Port vault address not found - parseLendingRateUpdated failed.`, log.transactionHash);
+  }
+
+  const portVault = portVaults.get(portVaultAddress.toLowerCase()) ?? await portService.getPortVaultByAddress(ctx, portVaultAddress);
+
+  if (!portVault) {
+    throwError(`Port vault not found - parseLendingRateUpdated failed.`, log.transactionHash);
+  }
+
+  const { newRate } = AccountantAbi.events.LendingRateUpdated.decode(log);
+
+  portVault.totalActivity = portVault.totalActivity + BigInt(1);
+
+  const portVaultActivity = new PortVaultActivity({
+    id: `${PortVaultAction.LENDING_RATE_UPDATED}-${portVaultAddress}-${log.transactionHash}`,
+    vault: portVault,
+    action: PortVaultAction.LENDING_RATE_UPDATED,
+    details: `APR updated to ${Number((Number(newRate) / 100))}%`,
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
+  });
+
+  portVaultActivities.set(portVaultActivity.id, portVaultActivity);
+
+  if (newRate === BigInt(0)) {
+    portVault.type = PortVaultType.STANDARD;
+  } else {
+    portVault.type = PortVaultType.PAYFI;
+    portVault.apy = newRate;
+
+    const currentTimestamp = BigInt(log.block.timestamp);
+    const currentBlock = BigInt(log.block.height);
+    const apyId = `${portVault.id}-${currentTimestamp}-${log.transactionHash}`;
+
+    const portVaultAPY = new PortVaultAPY({
+      id: apyId,
+      vault: portVault,
+      apy: newRate,
+      timestamp: currentTimestamp,
+      block: currentBlock,
+    });
+
+    portVaultAPYs.set(apyId, portVaultAPY);
+  }
+
+  portVaults.set(portVault.address.toLowerCase(), portVault);
+
+  return { portVaults, portVaultActivities, portVaultAPYs };
+}
+
+async function parseManagementFeeUpdated(ctx: ProcessorContext, log: Log, config: Config, portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>, isPayFi: boolean = false): Promise<{ portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity> }> {
+  const accountantAddress = log.address;
+
+  const portVaultAddress = config.Port?.Vaults?.find((vault) => vault.Accountant.toLowerCase() == accountantAddress.toLowerCase())?.address;
+
+  if (!portVaultAddress) {
+    throwError(`Port vault address not found - parseManagementFeeUpdated failed.`, log.transactionHash);
+  }
+
+  const portVault = portVaults.get(portVaultAddress.toLowerCase()) ?? await portService.getPortVaultByAddress(ctx, portVaultAddress);
+
+  if (!portVault) {
+    throwError(`Port vault not found - parseManagementFeeUpdated failed.`, log.transactionHash);
+  }
+
+  const newFee = AccountantAbi.events.ManagementFeeRateUpdated.decode(log).newRate
+
+  portVault.managementFee = BigInt(newFee);
+  portVault.totalActivity = portVault.totalActivity + BigInt(1);
+  portVaults.set(portVault.address.toLowerCase(), portVault);
+
+  const portVaultActivity = new PortVaultActivity({
+    id: `${PortVaultAction.MANAGEMENT_FEE_UPDATED}-${portVaultAddress}-${log.transactionHash}`,
+    vault: portVault,
+    action: PortVaultAction.MANAGEMENT_FEE_UPDATED,
+    details: `Management fee updated to ${Number((Number(newFee) / 100))}%`,
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
+  });
+
+  portVaultActivities.set(portVaultActivity.id, portVaultActivity);
+
+  return { portVaults, portVaultActivities };
+}
+
+async function parseFeesClaimed(ctx: ProcessorContext, log: Log, config: Config, portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>, isPayFi: boolean = false): Promise<{ portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity> }> {
+  const accountantAddress = log.address;
+
+
+  const portVaultAddress = config.Port?.Vaults?.find((vault) => vault.Accountant.toLowerCase() == accountantAddress.toLowerCase())?.address;
+
+  if (!portVaultAddress) {
+    throwError(`Port vault address not found - parseManagementFeeUpdated failed.`, log.transactionHash);
+  }
+
+  const portVault = portVaults.get(portVaultAddress.toLowerCase()) ?? await portService.getPortVaultByAddress(ctx, portVaultAddress);
+
+  if (!portVault) {
+    throwError(`Port vault not found - parseManagementFeeUpdated failed.`, log.transactionHash);
+  }
+
+  const { amount } = AccountantAbi.events.FeesClaimed.decode(log);
+
+  // Fees claimed reduce NAV/assets but do NOT burn shares
+  // NAV updates via ExchangeRateUpdated will reflect the fee impact
+  // EER recompute happens at time window intervals - no event-triggered recompute
+
+  portVault.totalActivity = portVault.totalActivity + BigInt(1);
+  portVaults.set(portVault.address.toLowerCase(), portVault);
+
+  const portVaultActivity = new PortVaultActivity({
+    id: `${PortVaultAction.FEES_CLAIMED}-${portVaultAddress}-${log.transactionHash}`,
+    vault: portVault,
+    action: PortVaultAction.FEES_CLAIMED,
+    details: `Fees claimed: $${Number((Number(amount) / (10 ** Number(portVault.baseToken.decimals))).toPrecision(6))}`,
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
+  });
+
+  portVaultActivities.set(portVaultActivity.id, portVaultActivity);
+
+  return { portVaults, portVaultActivities };
+}
+
+async function parseDepositCapUpdated(ctx: ProcessorContext, log: Log, config: Config, portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>): Promise<{ portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity> }> {
+  const tellerAddress = log.address;
+
+  const portVaultAddress = config.Port?.Vaults?.find((vault) => vault.Teller.toLowerCase() == tellerAddress.toLowerCase())?.address;
+
+  if (!portVaultAddress) {
+    throwError(`Port vault address not found - parseDepositCapUpdated failed.`, log.transactionHash);
+  }
+
+  const portVault = portVaults.get(portVaultAddress.toLowerCase()) ?? await portService.getPortVaultByAddress(ctx, portVaultAddress);
+
+  if (!portVault) {
+    throwError(`Port vault not found - parseDepositCapUpdated failed.`, log.transactionHash);
+  }
+
+  const { newCap, oldCap } = TellerAbi.events.DepositCapUpdated.decode(log);
+
+  portVault.depositCap = newCap;
+  portVaults.set(portVault.address.toLowerCase(), portVault);
+
+  const portVaultActivity = new PortVaultActivity({
+    id: `${PortVaultAction.DEPOSIT_CAP_UPDATED}-${portVaultAddress}-${log.transactionHash}`,
+    vault: portVault,
+    action: PortVaultAction.DEPOSIT_CAP_UPDATED,
+    details: `Deposit cap updated from $${Number((Number(oldCap) / (10 ** Number(portVault.baseToken.decimals))).toPrecision(6))} to $${Number((Number(newCap) / (10 ** Number(portVault.baseToken.decimals))).toPrecision(6))}`,
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
+  });
+
+  portVaultActivities.set(portVaultActivity.id, portVaultActivity);
+
+  return { portVaults, portVaultActivities };
+}
+
+async function parseFundsDiverted(ctx: ProcessorContext, log: Log, config: Config, portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>, fundsDiverted: Map<string, FundsDiverted>): Promise<{ portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>, fundsDiverted: Map<string, FundsDiverted> }> {
+  const { amount, user: vaultAddress, reserve, onBehalfOf } = AaveV3PoolAbi.events.Supply.decode(log);
+
+  // Track based on user (who initiated the supply from the vault)
+  const portVaultAddress = config.Port?.Vaults?.find((vault) => vault.address.toLowerCase() == vaultAddress.toLowerCase())?.address;
+  if (!portVaultAddress) {
+    return { portVaults, portVaultActivities, fundsDiverted };
+  }
+
+  ctx.log.info(
+    `[AAVE SUPPLY DEBUG] block=${log.block.height} txHash=${log.transactionHash} ` +
+    `pool=${log.address.toLowerCase()} user=${vaultAddress.toLowerCase()} ` +
+    `onBehalfOf=${onBehalfOf.toLowerCase()} reserve=${reserve.toLowerCase()} amount=${amount.toString()}`
+  )
+
+  const portVault = portVaults.get(portVaultAddress.toLowerCase()) ?? await portService.getPortVaultByAddress(ctx, portVaultAddress);
+
+  if (!portVault) {
+    throwError(`Port vault not found - parseFundsDiverted failed.`, log.transactionHash);
+  }
+
+  // Normalize amount to base token decimals for EER tracking
+  const reserveLower = reserve.toLowerCase();
+  const baseTokenLower = portVault.baseToken.address.toLowerCase();
+  const baseDec = Number(portVault.baseToken.decimals);
+  let amountBase = BigInt(amount);
+  
+  // If reserve is not the base token, normalize decimals
+  if (reserveLower !== baseTokenLower) {
+    const tokenDec = await getTokenDecimalsCached(ctx, reserveLower);
+    amountBase = normalizeDecimals(BigInt(amount), tokenDec, baseDec);
+  }
+
+  // ============================================================================
+  // EER: Record FUNDS_DIVERTED event to inbox
+  // ============================================================================
+  const cfg = getEERConfigForVault(config, portVault.address);
+  if (cfg) {
+    const ts = toSec(log.block.timestamp);
+    ctx.log.info(
+      `[EER PARSER] kind=FUNDS_DIVERTED vault=${portVault.address} vaultId=${portVault.id} ` +
+      `block=${log.block.height} ts=${ts} tx=${log.transactionHash} idx=${log.logIndex} ` +
+      `strategy=AAVE reserve=${reserveLower} amountRaw=${amount.toString()} amountBase=${amountBase.toString()}`
+    );
+    await eerService.recordFundsDivertedEvent(
+      ctx,
+      portVault,
+      amountBase,
+      'AAVE',
+      log,
+      reserveLower,
+      BigInt(amount),
+      await getTokenDecimalsCached(ctx, reserveLower)
+    );
+  }
+
+  const portFundsDiverted = new FundsDiverted({
+    id: `${PortVaultAction.FUNDS_DIVERTED}-${portVaultAddress}-${log.transactionHash}`,
+    vault: portVault,
+    amount: BigInt(amount),
+    strategy: log.address.toLowerCase(),
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
+  });
+
+  fundsDiverted.set(portFundsDiverted.id, portFundsDiverted);
+  portVault.fundsDiverted = portVault.fundsDiverted + BigInt(amount);
+  portVaults.set(portVault.address.toLowerCase(), portVault);
+
+  const portVaultActivity = new PortVaultActivity({
+    id: `${PortVaultAction.FUNDS_DIVERTED}-${portVaultAddress}-${log.transactionHash}`,
+    vault: portVault,
+    action: PortVaultAction.FUNDS_DIVERTED,
+    details: `[AAVE] Funds diverted: $${Number((Number(amount) / (10 ** Number(portVault.baseToken.decimals))).toPrecision(6))}`,
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
+  });
+
+  portVaultActivities.set(portVaultActivity.id, portVaultActivity);
+
+  return { portVaults, portVaultActivities, fundsDiverted };
+}
+
+async function parseFundsReverted(ctx: ProcessorContext, log: Log, config: Config, portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>, fundsReverted: Map<string, FundsReverted>): Promise<{ portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>, fundsReverted: Map<string, FundsReverted> }> {
+  const { amount, user: vaultAddress, reserve, to } = AaveV3PoolAbi.events.Withdraw.decode(log);
+  const portVaultAddress = config.Port?.Vaults?.find((vault) => vault.address.toLowerCase() == vaultAddress.toLowerCase())?.address;
+
+  if (!portVaultAddress) {
+    return { portVaults, portVaultActivities, fundsReverted };
+  }
+
+  const portVault = portVaults.get(portVaultAddress.toLowerCase()) ?? await portService.getPortVaultByAddress(ctx, portVaultAddress);
+
+  if (!portVault) {
+    throwError(`Port vault not found - parseFundsReverted failed.`, log.transactionHash);
+  }
+
+  if (portVault.fundsDiverted < BigInt(amount)) {
+    ctx.log.warn(
+      `[AAVE WITHDRAW] Funds diverted (${portVault.fundsDiverted.toString()}) is less than withdraw amount (${amount.toString()}). ` +
+      `Clamping to available. txHash=${log.transactionHash}`
+    )
+  }
+
+  ctx.log.info(
+    `[AAVE WITHDRAW DEBUG] block=${log.block.height} txHash=${log.transactionHash} ` +
+    `pool=${log.address.toLowerCase()} user=${vaultAddress.toLowerCase()} ` +
+    `to=${to.toLowerCase()} reserve=${reserve.toLowerCase()} amount=${amount.toString()}`
+  )
+
+  // Normalize amount to base token decimals for EER tracking
+  const reserveLower = reserve.toLowerCase();
+  const baseTokenLower = portVault.baseToken.address.toLowerCase();
+  const baseDec = Number(portVault.baseToken.decimals);
+  let amountBase = BigInt(amount);
+  
+  // If reserve is not the base token, normalize decimals
+  if (reserveLower !== baseTokenLower) {
+    const tokenDec = await getTokenDecimalsCached(ctx, reserveLower);
+    amountBase = normalizeDecimals(BigInt(amount), tokenDec, baseDec);
+  }
+
+  // ============================================================================
+  // EER: Record FUNDS_REVERTED event to inbox
+  // ============================================================================
+  const cfg = getEERConfigForVault(config, portVault.address);
+  if (cfg) {
+    const ts = toSec(log.block.timestamp);
+    ctx.log.info(
+      `[EER PARSER] kind=FUNDS_REVERTED vault=${portVault.address} vaultId=${portVault.id} ` +
+      `block=${log.block.height} ts=${ts} tx=${log.transactionHash} idx=${log.logIndex} ` +
+      `strategy=AAVE reserve=${reserveLower} amountRaw=${amount.toString()} amountBase=${amountBase.toString()}`
+    );
+    await eerService.recordFundsRevertedEvent(
+      ctx,
+      portVault,
+      amountBase,
+      'AAVE',
+      log,
+      reserveLower,
+      BigInt(amount),
+      await getTokenDecimalsCached(ctx, reserveLower)
+    );
+  }
+
+  const portFundsReverted = new FundsReverted({
+    id: `${PortVaultAction.FUNDS_REVERTED}-${portVaultAddress}-${log.transactionHash}`,
+    vault: portVault,
+    amount: BigInt(amount),
+    strategy: log.address.toLowerCase(),
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
+  });
+
+  fundsReverted.set(portFundsReverted.id, portFundsReverted);
+
+  // Clamp to prevent negative values
+  const newFundsDiverted = portVault.fundsDiverted - BigInt(amount)
+  portVault.fundsDiverted = newFundsDiverted < 0n ? 0n : newFundsDiverted;
+  portVaults.set(portVault.address.toLowerCase(), portVault);
+
+  const portVaultActivity = new PortVaultActivity({
+    id: `${PortVaultAction.FUNDS_REVERTED}-${portVaultAddress}-${log.transactionHash}`,
+    vault: portVault,
+    action: PortVaultAction.FUNDS_REVERTED,
+    details: `[AAVE] Funds reverted: $${Number((Number(amount) / (10 ** Number(portVault.baseToken.decimals))).toPrecision(6))}`,
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
+  });
+
+  portVaultActivities.set(portVaultActivity.id, portVaultActivity);
+
+  return { portVaults, portVaultActivities, fundsReverted };
+}
+
+async function parseFundsDivertedToClearpool(ctx: ProcessorContext, log: Log, config: Config, portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>, fundsDiverted: Map<string, FundsDiverted>): Promise<{ portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>, fundsDiverted: Map<string, FundsDiverted> }> {
+  const { from, amount, to, shares } = BoringVaultAbi.events.Enter.decode(log);
+
+  // Debug logging for all Clearpool Enter events
+  ctx.log.info(
+    `[CLEARPOOL ENTER DEBUG] block=${log.block.height} txHash=${log.transactionHash} ` +
+    `clearpoolVault=${log.address.toLowerCase()} from=${from.toLowerCase()} to=${to.toLowerCase()} ` +
+    `amount=${amount.toString()} shares=${shares.toString()}`
+  )
+
+  const portVaultAddress = config.Port?.Vaults?.find((vault) => vault.address.toLowerCase() == to.toLowerCase())?.address;
+  if (!portVaultAddress) {
+    ctx.log.info(
+      `[CLEARPOOL ENTER DEBUG] No matching Port vault found for to=${to.toLowerCase()}. ` +
+      `Available vaults: ${config.Port?.Vaults?.map(v => v.address.toLowerCase()).join(', ')}`
+    )
+    return { portVaults, portVaultActivities, fundsDiverted };
+  }
+
+  ctx.log.info(
+    `[CLEARPOOL ENTER DEBUG] Matched Port vault: ${portVaultAddress} - marking for EER recompute`
+  )
+
+  const portVault = portVaults.get(portVaultAddress.toLowerCase()) ?? await portService.getPortVaultByAddress(ctx, portVaultAddress);
+
+  if (!portVault) {
+    throwError(`Port vault not found - parseFundsDiverted failed.`, log.transactionHash);
+  }
+
+  // EER recompute happens at time window intervals - no event-triggered recompute
+
+  const portFundsDiverted = new FundsDiverted({
+    id: `${PortVaultAction.FUNDS_DIVERTED}-${portVaultAddress}-${log.transactionHash}`,
+    vault: portVault,
+    amount: BigInt(amount),
+    strategy: log.address.toLowerCase(),
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
+  });
+
+  fundsDiverted.set(portFundsDiverted.id, portFundsDiverted);
+  portVault.fundsDiverted = portVault.fundsDiverted + BigInt(amount);
+  portVaults.set(portVault.address.toLowerCase(), portVault);
+
+  const portVaultActivity = new PortVaultActivity({
+    id: `${PortVaultAction.FUNDS_DIVERTED}-${portVaultAddress}-${log.transactionHash}`,
+    vault: portVault,
+    action: PortVaultAction.FUNDS_DIVERTED,
+    details: `[Clearpool Vault] Funds diverted: $${Number((Number(amount) / (10 ** Number(portVault.baseToken.decimals))).toPrecision(6))}`,
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
+  });
+
+  portVaultActivities.set(portVaultActivity.id, portVaultActivity);
+
+  return { portVaults, portVaultActivities, fundsDiverted };
+}
+
+async function parseFundsRevertedFromClearpool(ctx: ProcessorContext, log: Log, config: Config, portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>, fundsReverted: Map<string, FundsReverted>): Promise<{ portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>, fundsReverted: Map<string, FundsReverted> }> {
+  const { offerToken: strategy, user: vaultAddress, wantAmountReceived } = AtomicQueueAbi.events.AtomicRequestFulfilled.decode(log);
+  const portVaultAddress = config.Port?.Vaults?.find((vault) => vault.address.toLowerCase() == vaultAddress.toLowerCase())?.address;
+
+  if (!portVaultAddress) {
+    return { portVaults, portVaultActivities, fundsReverted };
+  }
+
+  const portVault = portVaults.get(portVaultAddress.toLowerCase()) ?? await portService.getPortVaultByAddress(ctx, portVaultAddress);
+
+  if (!portVault) {
+    throwError(`Port vault not found - parseFundsReverted failed.`, log.transactionHash);
+  }
+
+  if (portVault.fundsDiverted < BigInt(wantAmountReceived)) {
+    ctx.log.warn(
+      `[CLEARPOOL WITHDRAW] Funds diverted (${portVault.fundsDiverted.toString()}) is less than withdraw amount (${wantAmountReceived.toString()}). ` +
+      `Clamping to available. txHash=${log.transactionHash}`
+    )
+  }
+
+  // Amount is already in base token decimals (Clearpool vault uses base token)
+  const amountBase = BigInt(wantAmountReceived);
+
+  // ============================================================================
+  // EER: Record FUNDS_REVERTED event to inbox
+  // ============================================================================
+  const cfg = getEERConfigForVault(config, portVault.address);
+  if (cfg) {
+    const ts = toSec(log.block.timestamp);
+    ctx.log.info(
+      `[EER PARSER] kind=FUNDS_REVERTED vault=${portVault.address} vaultId=${portVault.id} ` +
+      `block=${log.block.height} ts=${ts} tx=${log.transactionHash} idx=${log.logIndex} ` +
+      `strategy=CLEARPOOL amountBase=${amountBase.toString()}`
+    );
+    await eerService.recordFundsRevertedEvent(
+      ctx,
+      portVault,
+      amountBase,
+      'CLEARPOOL',
+      log
+    );
+  }
+
+  const portFundsReverted = new FundsReverted({
+    id: `${PortVaultAction.FUNDS_REVERTED}-${portVaultAddress}-${log.transactionHash}`,
+    vault: portVault,
+    amount: BigInt(wantAmountReceived),
+    strategy: strategy.toLowerCase(),
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
+  });
+
+  fundsReverted.set(portFundsReverted.id, portFundsReverted);
+
+  // Clamp to prevent negative values
+  const newFundsDivertedCp = portVault.fundsDiverted - BigInt(wantAmountReceived)
+  portVault.fundsDiverted = newFundsDivertedCp < 0n ? 0n : newFundsDivertedCp;
+  portVaults.set(portVault.address.toLowerCase(), portVault);
+
+  const portVaultActivity = new PortVaultActivity({
+    id: `${PortVaultAction.FUNDS_REVERTED}-${portVaultAddress}-${log.transactionHash}`,
+    vault: portVault,
+    action: PortVaultAction.FUNDS_REVERTED,
+    details: `[Clearpool Vault] Funds reverted: $${Number((Number(wantAmountReceived) / (10 ** Number(portVault.baseToken.decimals))).toPrecision(6))}`,
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
+  });
+
+  portVaultActivities.set(portVaultActivity.id, portVaultActivity);
+
+  return { portVaults, portVaultActivities, fundsReverted };
+}
+
+async function parseFundsDivertedToCompound(ctx: ProcessorContext, log: Log, config: Config, portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>, fundsDiverted: Map<string, FundsDiverted>): Promise<{ portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>, fundsDiverted: Map<string, FundsDiverted> }> {
+  const { amount, from: vaultAddress } = CompoundUSDCAbi.events.Supply.decode(log);
+  const portVaultAddress = config.Port?.Vaults?.find((vault) => vault.address.toLowerCase() == vaultAddress.toLowerCase())?.address;
+  if (!portVaultAddress) {
+    return { portVaults, portVaultActivities, fundsDiverted };
+  }
+
+  const portVault = portVaults.get(portVaultAddress.toLowerCase()) ?? await portService.getPortVaultByAddress(ctx, portVaultAddress);
+
+  if (!portVault) {
+    throwError(`Port vault not found - parseFundsDiverted failed.`, log.transactionHash);
+  }
+
+  // Compound USDC amount is already in base token decimals (USDC = base token)
+  const amountBase = BigInt(amount);
+
+  // ============================================================================
+  // EER: Record FUNDS_DIVERTED event to inbox
+  // ============================================================================
+  const cfg = getEERConfigForVault(config, portVault.address);
+  if (cfg) {
+    const ts = toSec(log.block.timestamp);
+    ctx.log.info(
+      `[EER PARSER] kind=FUNDS_DIVERTED vault=${portVault.address} vaultId=${portVault.id} ` +
+      `block=${log.block.height} ts=${ts} tx=${log.transactionHash} idx=${log.logIndex} ` +
+      `strategy=COMPOUND amountBase=${amountBase.toString()}`
+    );
+    await eerService.recordFundsDivertedEvent(
+      ctx,
+      portVault,
+      amountBase,
+      'COMPOUND',
+      log
+    );
+  }
+
+  const portFundsDiverted = new FundsDiverted({
+    id: `${PortVaultAction.FUNDS_DIVERTED}-${portVaultAddress}-${log.transactionHash}`,
+    vault: portVault,
+    amount: BigInt(amount),
+    strategy: log.address.toLowerCase(),
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
+  });
+
+  fundsDiverted.set(portFundsDiverted.id, portFundsDiverted);
+  portVault.fundsDiverted = portVault.fundsDiverted + BigInt(amount);
+  portVaults.set(portVault.address.toLowerCase(), portVault);
+
+  const portVaultActivity = new PortVaultActivity({
+    id: `${PortVaultAction.FUNDS_DIVERTED}-${portVaultAddress}-${log.transactionHash}`,
+    vault: portVault,
+    action: PortVaultAction.FUNDS_DIVERTED,
+    details: `[Compound] Funds diverted: $${Number((Number(amount) / (10 ** Number(portVault.baseToken.decimals))).toPrecision(6))}`,
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
+  });
+
+  portVaultActivities.set(portVaultActivity.id, portVaultActivity);
+
+  return { portVaults, portVaultActivities, fundsDiverted };
+}
+
+async function parseFundsRevertedFromCompound(ctx: ProcessorContext, log: Log, config: Config, portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>, fundsReverted: Map<string, FundsReverted>): Promise<{ portVaults: Map<string, PortVault>, portVaultActivities: Map<string, PortVaultActivity>, fundsReverted: Map<string, FundsReverted> }> {
+  const { amount, to: vaultAddress } = CompoundUSDCAbi.events.Withdraw.decode(log);
+  const portVaultAddress = config.Port?.Vaults?.find((vault) => vault.address.toLowerCase() == vaultAddress.toLowerCase())?.address;
+
+  if (!portVaultAddress) {
+    return { portVaults, portVaultActivities, fundsReverted };
+  }
+
+  const portVault = portVaults.get(portVaultAddress.toLowerCase()) ?? await portService.getPortVaultByAddress(ctx, portVaultAddress);
+
+  if (!portVault) {
+    throwError(`Port vault not found - parseFundsReverted failed.`, log.transactionHash);
+  }
+
+  if (portVault.fundsDiverted < BigInt(amount)) {
+    ctx.log.warn(
+      `[COMPOUND WITHDRAW] Funds diverted (${portVault.fundsDiverted.toString()}) is less than withdraw amount (${amount.toString()}). ` +
+      `Clamping to available. txHash=${log.transactionHash}`
+    )
+  }
+
+  // Compound USDC amount is already in base token decimals (USDC = base token)
+  const amountBase = BigInt(amount);
+
+  // ============================================================================
+  // EER: Record FUNDS_REVERTED event to inbox
+  // ============================================================================
+  const cfg = getEERConfigForVault(config, portVault.address);
+  if (cfg) {
+    const ts = toSec(log.block.timestamp);
+    ctx.log.info(
+      `[EER PARSER] kind=FUNDS_REVERTED vault=${portVault.address} vaultId=${portVault.id} ` +
+      `block=${log.block.height} ts=${ts} tx=${log.transactionHash} idx=${log.logIndex} ` +
+      `strategy=COMPOUND amountBase=${amountBase.toString()}`
+    );
+    await eerService.recordFundsRevertedEvent(
+      ctx,
+      portVault,
+      amountBase,
+      'COMPOUND',
+      log
+    );
+  }
+
+  const portFundsReverted = new FundsReverted({
+    id: `${PortVaultAction.FUNDS_REVERTED}-${portVaultAddress}-${log.transactionHash}`,
+    vault: portVault,
+    amount: BigInt(amount),
+    strategy: log.address.toLowerCase(),
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
+  });
+
+  fundsReverted.set(portFundsReverted.id, portFundsReverted);
+
+  // Clamp to prevent negative values
+  const newFundsDivertedCo = portVault.fundsDiverted - BigInt(amount)
+  portVault.fundsDiverted = newFundsDivertedCo < 0n ? 0n : newFundsDivertedCo;
+  portVaults.set(portVault.address.toLowerCase(), portVault);
+
+  const portVaultActivity = new PortVaultActivity({
+    id: `${PortVaultAction.FUNDS_REVERTED}-${portVaultAddress}-${log.transactionHash}`,
+    vault: portVault,
+    action: PortVaultAction.FUNDS_REVERTED,
+    details: `[Compound] Funds reverted: $${Number((Number(amount) / (10 ** Number(portVault.baseToken.decimals))).toPrecision(6))}`,
+    timestamp: BigInt(log.block.timestamp),
+    txHash: log.transactionHash,
+  });
+
+  portVaultActivities.set(portVaultActivity.id, portVaultActivity);
+
+  return { portVaults, portVaultActivities, fundsReverted };
+}
+
+
+/**
+ * Parse a Transfer event to determine if it's a relevant borrower transfer.
+ * 
+ * This function handles:
+ * 1. DRAWDOWN: vault -> borrower (any vault asset) => increases BorrowedAssetBalance
+ * 2. TOPUP: borrower -> vault (base token only) => creates ManagerDeposit, does NOT modify BorrowedAssetBalance
+ * 
+ * Repayments are handled in parseAtomicRequestFulfilled(), not here.
+ */
+async function parseBorrowerTransfer(
+  ctx: ProcessorContext,
+  log: Log,
+  config: Config,
+  vaultAddress: string,
+  portVaults: Map<string, PortVault>,
+  managerWithdraws: Map<string, ManagerWithdraw>,
+  managerDeposits: Map<string, ManagerDeposit>,
+  portVaultActivities: Map<string, PortVaultActivity>
+): Promise<{
+  portVaults: Map<string, PortVault>;
+  managerWithdraws: Map<string, ManagerWithdraw>;
+  managerDeposits: Map<string, ManagerDeposit>;
+  portVaultActivities: Map<string, PortVaultActivity>;
+}> {
+  const vaultAddrLower = vaultAddress.toLowerCase();
+
+  // Decode Transfer event
+  const { from, to, value } = ERC20Abi.events.Transfer.decode(log);
+  const token = log.address.toLowerCase();
+  const fromLower = from.toLowerCase();
+  const toLower = to.toLowerCase();
+  const txHash = log.transactionHash;
+  const logIndex = log.logIndex;
+  const isDebug = isEERDebugEnabled(config, vaultAddrLower);
+
+  if (isDebug) {
+    ctx.log.info(
+      `[BORROWER TRANSFER DEBUG] Transfer detected: token=${token} from=${fromLower} to=${toLower} value=${value.toString()} vault=${vaultAddrLower}`
+    );
+  }
+
+  // Load vault
+  let vault = portVaults.get(vaultAddrLower) ?? (await portService.getPortVaultByAddress(ctx, vaultAddrLower));
+  if (!vault) {
+    ctx.log.warn(`[BORROWER TRANSFER] Vault ${vaultAddrLower} not found`);
+    return { portVaults, managerWithdraws, managerDeposits, portVaultActivities };
+  }
+  portVaults.set(vaultAddrLower, vault);
+
+  // Get EER config to get borrower
+  const cfg = getEERConfigForVault(config, vaultAddrLower);
+  if (!cfg) {
+    if (isDebug) {
+      ctx.log.info(`[BORROWER TRANSFER DEBUG] No EER config for vault ${vaultAddrLower}`);
+    }
+    return { portVaults, managerWithdraws, managerDeposits, portVaultActivities };
+  }
+
+  // Bug C Fix: Lowercase borrower for comparisons
+  const borrowerLower = cfg.borrower.toLowerCase();
+
+  // Case 1: DRAWDOWN - vault -> borrower (any vault asset)
+  const isDrawdown = fromLower === vaultAddrLower && toLower === borrowerLower;
+  if (isDrawdown) {
+    // Bug D Fix: Normalize vault.assets to lowercase for comparison
+    const vaultAssetsLower = vault.assets.map(a => a.toLowerCase());
+    if (!vaultAssetsLower.includes(token)) {
+      if (isDebug) {
+        ctx.log.info(
+          `[BORROWER TRANSFER DEBUG] Token ${token} not in vault ${vaultAddrLower} assets: ${vault.assets.join(', ')}`
+        );
+      }
+      return { portVaults, managerWithdraws, managerDeposits, portVaultActivities };
+    }
+
+    if (isDebug) {
+      ctx.log.info(
+        `[BORROWER TRANSFER DEBUG] DRAWDOWN detected for vault=${vaultAddrLower}`
+      );
+    }
+
+    // Get token decimals
+    const tokenDecimals = await getTokenDecimalsCached(ctx, token);
+    const baseDec = Number(vault.baseToken.decimals);
+
+    // Normalize to base token decimals
+    const amountBaseRaw = normalizeDecimals(value, tokenDecimals, baseDec);
+
+    // Create entity ID
+    const entityId = `${vault.id}-${token}-${txHash}-${logIndex}`;
+
+    // Create ManagerWithdraw
+    const entity = new ManagerWithdraw({
+      id: entityId,
+      vault,
+      vaultAddress: vaultAddrLower,
+      borrower: borrowerLower,
+      token,
+      amountRaw: value,
+      tokenDecimals,
+      amountBaseRaw,
+      timestamp: BigInt(log.block.timestamp),
+      block: BigInt(log.block.height),
+      txHash,
+      logIndex,
+    });
+    managerWithdraws.set(entityId, entity);
+
+    if (isDebug) {
+      ctx.log.info(
+        `[BORROWER TRANSFER DEBUG] Created ManagerWithdraw: id=${entityId} amountRaw=${value.toString()} amountBaseRaw=${amountBaseRaw.toString()}`
+      );
+    }
+
+    // Create PortVaultActivity for MANAGER_WITHDRAWN
+    const activityId = `${vault.id}-${PortVaultAction.MANAGER_WITHDRAWN}-${txHash}-${logIndex}`;
+    const amountRawFormatted = Number((Number(value) / (10 ** tokenDecimals)).toPrecision(6));
+    const portVaultActivity = new PortVaultActivity({
+      id: activityId,
+      vault: vault,
+      action: PortVaultAction.MANAGER_WITHDRAWN,
+      details: `Borrower withdrew: ${amountRawFormatted}`,
+      timestamp: BigInt(log.block.timestamp),
+      txHash: txHash,
+    });
+    portVaultActivities.set(activityId, portVaultActivity);
+
+    // ============================================================================
+    // EER: ONE CALL ONLY - record event to inbox
+    // Parser determines domain kind (MANAGER_WITHDRAW); eerService maps to EER event
+    // ============================================================================
+    const ts = toSec(log.block.timestamp);
+    ctx.log.info(
+      `[EER PARSER] kind=DRAWDOWN domainKind=MANAGER_WITHDRAW vault=${vault.address} vaultId=${vault.id} ` +
+      `block=${log.block.height} ts=${ts} tx=${txHash} idx=${logIndex} ` +
+      `token=${token} amountRaw=${value.toString()} amountBaseRaw=${amountBaseRaw.toString()} tokenDecimals=${tokenDecimals}`
+    );
+    await eerService.recordBorrowerTransferEvent(ctx, vault, log, config, 'MANAGER_WITHDRAW');
+
+    return { portVaults, managerWithdraws, managerDeposits, portVaultActivities };
+  }
+
+  // Case 2: TOPUP - borrower -> vault (base token only)
+  const isTopup = fromLower === borrowerLower && toLower === vaultAddrLower;
+  if (isTopup) {
+    // Only handle base token topups
+    const baseTokenAddrLower = vault.baseToken.address.toLowerCase();
+    if (token !== baseTokenAddrLower) {
+      if (isDebug) {
+        ctx.log.info(
+          `[BORROWER TRANSFER DEBUG] Topup with non-base token ignored: token=${token} baseToken=${baseTokenAddrLower}`
+        );
+      }
+      return { portVaults, managerWithdraws, managerDeposits, portVaultActivities };
+    }
+
+    if (isDebug) {
+      ctx.log.info(
+        `[BORROWER TRANSFER DEBUG] TOPUP detected for vault=${vaultAddrLower}`
+      );
+    }
+
+    // Get token decimals
+    const tokenDecimals = await getTokenDecimalsCached(ctx, token);
+    const baseDec = Number(vault.baseToken.decimals);
+
+    // Normalize to base token decimals
+    const amountBaseRaw = normalizeDecimals(value, tokenDecimals, baseDec);
+
+    // Create entity ID
+    const entityId = `${vault.id}-${token}-${txHash}-${logIndex}`;
+
+    // Create ManagerDeposit
+    const entity = new ManagerDeposit({
+      id: entityId,
+      vault,
+      vaultAddress: vaultAddrLower,
+      borrower: borrowerLower,
+      token,
+      amountRaw: value,
+      tokenDecimals,
+      amountBaseRaw,
+      timestamp: BigInt(log.block.timestamp),
+      block: BigInt(log.block.height),
+      txHash,
+      logIndex,
+    });
+    managerDeposits.set(entityId, entity);
+
+    if (isDebug) {
+      ctx.log.info(
+        `[BORROWER TRANSFER DEBUG] Created ManagerDeposit: id=${entityId} amountRaw=${value.toString()} amountBaseRaw=${amountBaseRaw.toString()}`
+      );
+    }
+
+    // Create PortVaultActivity for MANAGER_DEPOSITED
+    const activityId = `${vault.id}-${PortVaultAction.MANAGER_DEPOSITED}-${txHash}-${logIndex}`;
+    const amountRawFormatted = Number((Number(value) / (10 ** tokenDecimals)).toPrecision(6));
+    const portVaultActivity = new PortVaultActivity({
+      id: activityId,
+      vault: vault,
+      action: PortVaultAction.MANAGER_DEPOSITED,
+      details: `Borrower deposited: ${amountRawFormatted}`,
+      timestamp: BigInt(log.block.timestamp),
+      txHash: txHash,
+    });
+    portVaultActivities.set(activityId, portVaultActivity);
+
+    // ============================================================================
+    // EER: ONE CALL ONLY - record event to inbox
+    // Parser determines domain kind (MANAGER_DEPOSIT); eerService maps to EER event
+    // ============================================================================
+    const ts = toSec(log.block.timestamp);
+    ctx.log.info(
+      `[EER PARSER] kind=TOPUP domainKind=MANAGER_DEPOSIT vault=${vault.address} vaultId=${vault.id} ` +
+      `block=${log.block.height} ts=${ts} tx=${txHash} idx=${logIndex} ` +
+      `token=${token} amountRaw=${value.toString()} amountBaseRaw=${amountBaseRaw.toString()} tokenDecimals=${tokenDecimals}`
+    );
+    await eerService.recordBorrowerTransferEvent(ctx, vault, log, config, 'MANAGER_DEPOSIT');
+
+    return { portVaults, managerWithdraws, managerDeposits, portVaultActivities };
+  }
+
+  // Not a drawdown or topup - ignore silently
+  if (isDebug) {
+    ctx.log.info(
+      `[BORROWER TRANSFER DEBUG] Transfer doesn't match patterns: vault=${vaultAddrLower} borrower=${borrowerLower} from=${fromLower} to=${toLower}`
+    );
+  }
+
+  return { portVaults, managerWithdraws, managerDeposits, portVaultActivities };
+}
+
+export const parserService = {
+  parseVaultEnter,
+  parseAtomicRequestUpdated,
+  parseNaraRedemptionActivity,
+  parseVaultStatusUpdate,
+  parseNavUpdate,
+  parseAssetAdded,
+  parseAssetRemoved,
+  parseAtomicRequestFulfilled,
+  parseLendingRateUpdated,
+  parseManagementFeeUpdated,
+  parseFeesClaimed,
+  parseDepositCapUpdated,
+  parseFundsDiverted,
+  parseFundsReverted,
+  parseFundsDivertedToClearpool,
+  parseFundsRevertedFromClearpool,
+  parseFundsDivertedToCompound,
+  parseFundsRevertedFromCompound,
+  parseBorrowerTransfer,
 }
