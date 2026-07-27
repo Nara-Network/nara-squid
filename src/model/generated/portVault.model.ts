@@ -56,6 +56,9 @@ export class PortVault {
     @BigIntColumn_({nullable: false})
     avg1yApy!: bigint
 
+    @BigIntColumn_({nullable: false})
+    apyBetweenUpdates!: bigint
+
     @IntColumn_({nullable: false})
     riskLevel!: number
 

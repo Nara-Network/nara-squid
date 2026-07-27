@@ -129,6 +129,7 @@ async function initializePort({ ctx, config, portVaults, expectedExchangeRates }
       avg7dApy: BigInt(0),
       avg30dApy: BigInt(0),
       avg1yApy: BigInt(0),
+      apyBetweenUpdates: BigInt(0),
       riskLevel: 0,
       totalWithdrawalRequestsInBaseToken: BigInt(0),
       totalPendingWithdrawalRequests: BigInt(0),
@@ -321,6 +322,89 @@ async function calculateAverageAPYForPeriod(
   const result = BigInt(Math.round(avg));
 
   return result;
+}
+
+/**
+ * APR (in bps) between the two most recent NAV updates, annualized by the
+ * actual elapsed time between them: (rateNow / ratePrev - 1) * (365 / daysBetween).
+ * Returns null when there are fewer than two usable updates.
+ */
+async function calculateApyBetweenUpdates(
+  ctx: ProcessorContext,
+  vaultAddress: string,
+  currentTimestamp: number,
+  startApyCalculationTimestamp?: number,
+  portNavUpdates?: Map<string, PortNavUpdate>
+): Promise<bigint | null> {
+  const navDecimals = 10n ** 18n;
+  const vaultAddressLower = vaultAddress.toLowerCase();
+
+  const dbNavUpdates = await ctx.store.find(PortNavUpdate, {
+    where: {
+      vault: { address: vaultAddress, network: ctx.syncedNetwork },
+      timestamp: LessThanOrEqual(BigInt(currentTimestamp))
+    },
+    order: { timestamp: 'DESC' },
+    take: 10
+  });
+
+  const memNavUpdates = portNavUpdates
+    ? Array.from(portNavUpdates.values())
+      .filter(update => update.vault.address.toLowerCase() === vaultAddressLower && Number(update.timestamp) <= currentTimestamp)
+    : [];
+
+  // Combine and deduplicate by id, newest first
+  const allUpdatesMap: { [id: string]: PortNavUpdate } = {};
+  for (const update of [...dbNavUpdates, ...memNavUpdates]) {
+    allUpdatesMap[update.id] = update;
+  }
+  let updates = Object.values(allUpdatesMap)
+    .sort((a, b) => Number(b.timestamp) - Number(a.timestamp));
+
+  if (startApyCalculationTimestamp !== undefined) {
+    updates = updates.filter(update => Number(update.timestamp) >= startApyCalculationTimestamp);
+  }
+
+  if (updates.length < 2) {
+    return null;
+  }
+
+  const latest = updates[0];
+
+  // Use the most recent earlier update that is at least MIN_APY_CALCULATION_ELAPSED_MS
+  // older than the latest one, so same-block / near-simultaneous updates don't
+  // produce absurd annualized values.
+  const previous = updates.find(update => Number(latest.timestamp) - Number(update.timestamp) >= MIN_APY_CALCULATION_ELAPSED_MS);
+
+  if (!previous) {
+    return null;
+  }
+
+  if (latest.newRate === 0n || previous.newRate === 0n) {
+    ctx.log.warn(`[Between-Updates APR] Invalid exchange rate (0) for vault ${vaultAddress}`);
+    return null;
+  }
+
+  const erCurrent = Number(latest.newRate) / Number(navDecimals);
+  const erPrevious = Number(previous.newRate) / Number(navDecimals);
+
+  const daysElapsed = (Number(latest.timestamp) - Number(previous.timestamp)) / (24 * 60 * 60 * 1000);
+  if (daysElapsed <= 0) {
+    return null;
+  }
+
+  const apr = (erCurrent / erPrevious - 1) * (365 / daysElapsed);
+  const aprBps = Math.round(apr * 10000);
+
+  const MAX_APR_BPS = 100000;
+  const clampedAprBps = Math.min(Math.max(aprBps, -MAX_APR_BPS), MAX_APR_BPS);
+
+  if (!Number.isFinite(clampedAprBps) || Number.isNaN(clampedAprBps)) {
+    ctx.log.warn(`[Between-Updates APR] Invalid aprBps=${aprBps} for vault ${vaultAddress}`);
+    return null;
+  }
+
+  return BigInt(clampedAprBps);
 }
 
 async function calculateRollingAPR(
@@ -764,7 +848,7 @@ async function getOrCreateDailyChartEntry(
   return null;
 }
 
-async function updateAllVaultAPY(ctx: ProcessorContext, portVaults: Map<string, PortVault>, portVaultAPYs: Map<string, PortVaultAPY>): Promise<{ portVaults: Map<string, PortVault>, portVaultAPYs: Map<string, PortVaultAPY> }> {
+async function updateAllVaultAPY(ctx: ProcessorContext, portVaults: Map<string, PortVault>, portVaultAPYs: Map<string, PortVaultAPY>, config: Config): Promise<{ portVaults: Map<string, PortVault>, portVaultAPYs: Map<string, PortVaultAPY> }> {
   const currentBlockTimestamp = ctx.blocks[ctx.blocks.length - 1].header.timestamp;
   const currentTime = new Date(currentBlockTimestamp);
   const isSynced = ctx.isHead && ctx.blocks.length === 1;
@@ -800,6 +884,16 @@ async function updateAllVaultAPY(ctx: ProcessorContext, portVaults: Map<string, 
       portVault.avg7dApy = avg7dApy;
       portVault.avg30dApy = avg30dApy;
       portVault.avg1yApy = avg1yApy;
+
+      // Daily catch-up for the between-updates APR (primary updates happen in parseNavUpdate)
+      if (portVault.type === PortVaultType.STANDARD) {
+        const startApyCalculationTimestamp = config.Port?.Vaults?.find((v) => v.address.toLowerCase() == portVault.address.toLowerCase())?.StartApyCalculationTimestamp;
+        const apyBetweenUpdates = await calculateApyBetweenUpdates(ctx, portVault.address, currentBlockTimestamp, startApyCalculationTimestamp);
+        if (apyBetweenUpdates !== null) {
+          portVault.apyBetweenUpdates = apyBetweenUpdates;
+        }
+      }
+
       portVaults.set(portVault.address.toLowerCase(), portVault);
     } catch (error) {
       ctx.log.error(`[APY] ❌ Failed to calculate daily average APY for vault ${portVault.id}: ${error}`);
@@ -1060,6 +1154,7 @@ export const portService = {
   getPortVaultByAddress,
   calculateAPRFromRate,
   calculateAverageAPYForPeriod,
+  calculateApyBetweenUpdates,
   calculateRollingAPR,
   calculateVaultTvlAtBlock,
   getOrCreateDailyChartEntry,

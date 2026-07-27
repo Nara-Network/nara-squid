@@ -1,4 +1,3 @@
-
 import { ProcessorContext, Log } from '../common/dataSet';
 
 import { Config } from '../common/types';
@@ -544,6 +543,13 @@ async function parseNavUpdate(ctx: ProcessorContext, log: Log, config: Config, p
     const startApyCalculationTimestamp = config.Port?.Vaults?.find((vault) => vault.address.toLowerCase() == portVault.address.toLowerCase())?.StartApyCalculationTimestamp;
     const apyAllTime = await portService.calculateAPRFromRate(ctx, newPortNavUpdate, portVault, startApyCalculationTimestamp);
     portVault.apy = apyAllTime;
+
+    // APR between this NAV update and the previous one (newPortNavUpdate is
+    // already in the portNavUpdates map, so it is picked up as the latest).
+    const apyBetweenUpdates = await portService.calculateApyBetweenUpdates(ctx, portVault.address, Number(log.block.timestamp), startApyCalculationTimestamp, portNavUpdates);
+    if (apyBetweenUpdates !== null) {
+      portVault.apyBetweenUpdates = apyBetweenUpdates;
+    }
 
     const currentTimestamp = BigInt(log.block.timestamp);
     const currentBlock = BigInt(log.block.height);
