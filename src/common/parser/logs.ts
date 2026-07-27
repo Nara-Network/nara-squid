@@ -549,7 +549,7 @@ export async function parseContext(
     portVaults
   ));
 
-  ({ portVaults, portVaultAPYs } = await portService.updateAllVaultAPY(ctx, portVaults, portVaultAPYs));
+  ({ portVaults, portVaultAPYs } = await portService.updateAllVaultAPY(ctx, portVaults, portVaultAPYs, config));
 
   ({ portVaults, portVaultApyCharts } = await portService.updateAllVaultApyCharts(ctx, portVaults, portVaultApyCharts, config));
 
