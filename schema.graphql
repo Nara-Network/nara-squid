@@ -167,6 +167,9 @@ type PortVault @entity {
   avg7dApy: BigInt!
   avg30dApy: BigInt!
   avg1yApy: BigInt!
+  # APR (bps) between the two most recent NAV updates, annualized by the
+  # actual elapsed time between them. Updated on every ExchangeRateUpdated.
+  apyBetweenUpdates: BigInt!
   riskLevel: Int!
   depositCap: BigInt!
   totalWithdrawalRequestsInBaseToken: BigInt!
