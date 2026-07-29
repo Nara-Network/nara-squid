@@ -313,9 +313,9 @@ async function calculateAPRFromRate(ctx: ProcessorContext, lastNavUpdate: PortNa
     return BigInt(0);
   }
 
-  const navReturn = navEnd / navStart;
-
-  const apr = (navReturn - 1) * (365 / daysElapsed);
+  // Par-based APR: rate-point change on the original 1.0 deposit base,
+  // independent of the NAV level at the start of the window.
+  const apr = (navEnd - navStart) * (365 / daysElapsed);
 
   const MAX_APR_BPS = 100000;
   let aprBps = Math.round(apr * 10000);
@@ -444,7 +444,8 @@ async function calculateApyBetweenUpdates(
     return null;
   }
 
-  const apr = (erCurrent / erPrevious - 1) * (365 / daysElapsed);
+  // Par-based APR: rate-point change on the original 1.0 deposit base.
+  const apr = (erCurrent - erPrevious) * (365 / daysElapsed);
   const aprBps = Math.round(apr * 10000);
 
   const MAX_APR_BPS = 100000;
@@ -604,8 +605,8 @@ async function calculateRollingAPR(
 
   const erCurrent = Number(currentExchangeRate) / Number(navDecimals);
 
-  const navReturn = erCurrent / erPast;
-  const apr = (navReturn - 1) * annualizationFactor;
+  // Par-based APR: rate-point change on the original 1.0 deposit base.
+  const apr = (erCurrent - erPast) * annualizationFactor;
   const aprBps = Math.round(apr * 10000);
 
   const MAX_APR_BPS = 100000;
