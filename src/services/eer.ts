@@ -972,6 +972,116 @@ export function persistVaultState(
   eer.expectedExchangeRateBaseRaw = computeExpectedExchangeRate(vaultState, shareDecFactor);
 }
 
+// ---- Live EER math (pure; characterization-tested in src/test/eer-math.test.ts) ----
+
+function clamp0(x: bigint) {
+  return x < 0n ? 0n : x
+}
+
+export function computeLocalBorrowedBase(
+  borrowedPrincipalBaseTracked: bigint,
+  accruedBorrowInterestBase: bigint,
+  accruedCommitmentFeeBase: bigint
+) {
+  // borrowedBase = principal + interest + commitmentFee (all owed by borrower)
+  return borrowedPrincipalBaseTracked + accruedBorrowInterestBase + accruedCommitmentFeeBase
+}
+
+export function computeNetAssets(
+  idleBaseTracked: bigint,
+  divertedValueBase: bigint, // Current diverted value (principal + returns), NOT just principal
+  borrowedPrincipalBaseTracked: bigint,
+  accruedBorrowInterestBase: bigint,
+  accruedCommitmentFeeBase: bigint
+) {
+  // Option A invariant: netAssets = idle + divertedValueBase + borrowedBase
+  // divertedValueBase is the current strategy value (principal + returns)
+  // borrowedBase includes commitment fee, so no separate add needed
+  // CRITICAL: Do NOT use investedBaseTracked here - it's principal only and would double-count
+  // commitment fees that were already accrued on divertedValueBase
+  const borrowedBase = computeLocalBorrowedBase(borrowedPrincipalBaseTracked, accruedBorrowInterestBase, accruedCommitmentFeeBase)
+  return idleBaseTracked + divertedValueBase + borrowedBase
+}
+
+export function computeExchangeRate(netAssetsBase: bigint, totalShares: bigint, shareDecFactor: bigint) {
+  if (totalShares === 0n) return shareDecFactor // 1.0
+  if (netAssetsBase <= 0n) return 0n
+  return (netAssetsBase * shareDecFactor) / totalShares
+}
+
+/**
+ * Hard-coded commitment fee tiers (as per Excel spec 1.2(b) – Commitment Fee on Unutilized Capital)
+ *
+ * EXACT FORMULA with explicit boundaries:
+ * [0%, 10%) → 6% (600 bps)      [0, 1000) bps
+ * [10%, 50%) → 5% (500 bps)     [1000, 5000) bps
+ * [50%, 90%) → 3.50% (350 bps)  [5000, 9000) bps
+ * [90%, 100%] → 2.50% (250 bps) [9000, 10000] bps
+ *
+ * TIER BOUNDARY SEMANTICS:
+ * Uses strict > comparisons (not >=) to match Excel behavior:
+ * - utilBps > 9000 → 250 bps (90%+)
+ * - utilBps > 5000 → 350 bps (50-90%)
+ * - utilBps > 1000 → 500 bps (10-50%)
+ * - utilBps <= 1000 → 600 bps (0-10%)
+ *
+ * CRITICAL: Utilization is based on borrowedForTier (principal + interest, NO commitment fee)
+ * to avoid circular dependency. NO config overrides. NO fallbacks. Single source of truth.
+ *
+ * NOTE: Verify this matches Excel exactly - Excel may use >= at boundaries instead of >.
+ * If Excel uses ">= 50%" rather than "> 50%", update comparisons accordingly.
+ */
+export function getCommitmentFeeRateBps(utilizationBps: bigint): bigint {
+  // [90%, 100%] → 2.50% (250 bps) - uses > 9000 (strict greater than)
+  if (utilizationBps > 9000n) return 250n
+  // [50%, 90%) → 3.50% (350 bps) - uses > 5000 (strict greater than)
+  if (utilizationBps > 5000n) return 350n
+  // [10%, 50%) → 5% (500 bps) - uses > 1000 (strict greater than)
+  if (utilizationBps > 1000n) return 500n
+  // [0%, 10%) → 6% (600 bps) - uses <= 1000 (inclusive lower bound)
+  return 600n
+}
+
+export function accrueFeesBetween(
+  vaultAddress: string,
+  fromTs: number,
+  toTs: number,
+  idleBaseTracked: bigint,
+  divertedValueBase: bigint, // Changed from investedBaseTracked to divertedValueBase (current value, not just principal)
+  borrowedBaseStart: bigint, // EXCEL BEHAVIOR: principal + accruedBorrowInterest + accruedCommitmentFee (interest-on-interest)
+  rates: FeeRates,
+  commitFeeRemainderIn: bigint,
+  borrowInterestRemainderIn: bigint
+): { commitFee: bigint; borrowInterest: bigint; dtSec: number; commitFeeRemainder: bigint; borrowInterestRemainder: bigint } {
+  const dtSec = Math.max(0, toTs - fromTs)
+  if (dtSec <= 0) return { commitFee: 0n, borrowInterest: 0n, dtSec: 0, commitFeeRemainder: commitFeeRemainderIn, borrowInterestRemainder: borrowInterestRemainderIn }
+
+  const DENOM = BPS_DENOMINATOR * SECONDS_PER_YEAR
+
+  // Commitment fee accrues on unutilized capital = idle + divertedValueBase (current diverted value, not just principal)
+  // divertedValueBase represents the CURRENT strategy position value (principal + returns), not just principal
+  // REMAINDER ACCUMULATION: carry forward truncated fraction from previous segments to prevent
+  // BigInt truncation drift with small amounts / short time windows
+  const unutilisedBase = idleBaseTracked + divertedValueBase
+  const commitFeeNumerator = unutilisedBase * rates.commitFeeRateBps * BigInt(dtSec) + commitFeeRemainderIn
+  const commitFee = commitFeeNumerator / DENOM
+  const commitFeeRemainder = commitFeeNumerator % DENOM
+
+  // EXCEL BEHAVIOR: Borrow interest accrues on the FULL borrowed base (principal + accrued interest + accrued commit fee)
+  // This creates interest-on-interest compounding, matching Excel's discrete compounding on Borrowed$.
+  const borrowIntNumerator = borrowedBaseStart * rates.borrowRateBps * BigInt(dtSec) + borrowInterestRemainderIn
+  const borrowInterest = borrowIntNumerator / DENOM
+  const borrowInterestRemainder = borrowIntNumerator % DENOM
+
+  // Clamp deltas to >= 0 (should already be >= 0, but ensure it)
+  const commitFeeClamped = commitFee < 0n ? 0n : commitFee
+  const borrowInterestClamped = borrowInterest < 0n ? 0n : borrowInterest
+
+  // Detailed logging is handled by eerLog() in the calling code (debug-gated)
+
+  return { commitFee: commitFeeClamped, borrowInterest: borrowInterestClamped, dtSec, commitFeeRemainder, borrowInterestRemainder }
+}
+
 export async function updateExpectedExchangeRateForVaults(
   ctx: ProcessorContext,
   portVaults: Map<string, PortVault>,
@@ -1060,79 +1170,6 @@ export async function updateExpectedExchangeRateForVaults(
   // ============================================================================
   type FeeRates = { commitFeeRateBps: bigint; borrowRateBps: bigint }
 
-  function clamp0(x: bigint) {
-    return x < 0n ? 0n : x
-  }
-
-  function computeLocalBorrowedBase(
-    borrowedPrincipalBaseTracked: bigint,
-    accruedBorrowInterestBase: bigint,
-    accruedCommitmentFeeBase: bigint
-  ) {
-    // borrowedBase = principal + interest + commitmentFee (all owed by borrower)
-    return borrowedPrincipalBaseTracked + accruedBorrowInterestBase + accruedCommitmentFeeBase
-  }
-
-  function computeNetAssets(
-    idleBaseTracked: bigint,
-    divertedValueBase: bigint, // Current diverted value (principal + returns), NOT just principal
-    borrowedPrincipalBaseTracked: bigint,
-    accruedBorrowInterestBase: bigint,
-    accruedCommitmentFeeBase: bigint
-  ) {
-    // Option A invariant: netAssets = idle + divertedValueBase + borrowedBase
-    // divertedValueBase is the current strategy value (principal + returns)
-    // borrowedBase includes commitment fee, so no separate add needed
-    // CRITICAL: Do NOT use investedBaseTracked here - it's principal only and would double-count
-    // commitment fees that were already accrued on divertedValueBase
-    const borrowedBase = computeLocalBorrowedBase(borrowedPrincipalBaseTracked, accruedBorrowInterestBase, accruedCommitmentFeeBase)
-    return idleBaseTracked + divertedValueBase + borrowedBase
-  }
-
-  function computeExchangeRate(netAssetsBase: bigint, totalShares: bigint, shareDecFactor: bigint) {
-    if (totalShares === 0n) return shareDecFactor // 1.0
-    if (netAssetsBase <= 0n) return 0n
-    return (netAssetsBase * shareDecFactor) / totalShares
-  }
-
-  /**
-   * Hard-coded commitment fee tiers (as per Excel spec 1.2(b) – Commitment Fee on Unutilized Capital)
-   * 
-   * EXACT FORMULA with explicit boundaries:
-   * [0%, 10%) → 6% (600 bps)      [0, 1000) bps
-   * [10%, 50%) → 5% (500 bps)     [1000, 5000) bps
-   * [50%, 90%) → 3.50% (350 bps)  [5000, 9000) bps
-   * [90%, 100%] → 2.50% (250 bps) [9000, 10000] bps
-   * 
-   * Boundary rules:
-   * - 1000 bps (10.00%) → 5% tier (lower bound inclusive)
-   * - 5000 bps (50.00%) → 3.5% tier (lower bound inclusive)
-   * - 9000 bps (90.00%) → 2.5% tier (lower bound inclusive)
-   * 
-   * CRITICAL: Utilization is based on borrowedForTier (principal + interest, NO commitment fee)
-   * to avoid circular dependency. NO config overrides. NO fallbacks. Single source of truth.
-   * 
-   * TIER BOUNDARY SEMANTICS:
-   * Uses strict > comparisons (not >=) to match Excel behavior:
-   * - utilBps > 9000 → 250 bps (90%+)
-   * - utilBps > 5000 → 350 bps (50-90%)
-   * - utilBps > 1000 → 500 bps (10-50%)
-   * - utilBps <= 1000 → 600 bps (0-10%)
-   * 
-   * NOTE: Verify this matches Excel exactly - Excel may use >= at boundaries instead of >.
-   * If Excel uses ">= 50%" rather than "> 50%", update comparisons accordingly.
-   */
-  function getCommitmentFeeRateBps(utilizationBps: bigint): bigint {
-    // [90%, 100%] → 2.50% (250 bps) - uses > 9000 (strict greater than)
-    if (utilizationBps > 9000n) return 250n
-    // [50%, 90%) → 3.50% (350 bps) - uses > 5000 (strict greater than)
-    if (utilizationBps > 5000n) return 350n
-    // [10%, 50%) → 5% (500 bps) - uses > 1000 (strict greater than)
-    if (utilizationBps > 1000n) return 500n
-    // [0%, 10%) → 6% (600 bps) - uses <= 1000 (inclusive lower bound)
-    return 600n
-  }
-
   /**
    * Get fee rates for a vault state.
    * 
@@ -1168,46 +1205,6 @@ export async function updateExpectedExchangeRateForVaults(
     const commitFeeRateBps = getCommitmentFeeRateBps(utilForTierBps)
 
     return { commitFeeRateBps, borrowRateBps }
-  }
-
-  function accrueFeesBetween(
-    vaultAddress: string,
-    fromTs: number,
-    toTs: number,
-    idleBaseTracked: bigint,
-    divertedValueBase: bigint, // Changed from investedBaseTracked to divertedValueBase (current value, not just principal)
-    borrowedBaseStart: bigint, // EXCEL BEHAVIOR: principal + accruedBorrowInterest + accruedCommitmentFee (interest-on-interest)
-    rates: FeeRates,
-    commitFeeRemainderIn: bigint,
-    borrowInterestRemainderIn: bigint
-  ): { commitFee: bigint; borrowInterest: bigint; dtSec: number; commitFeeRemainder: bigint; borrowInterestRemainder: bigint } {
-    const dtSec = Math.max(0, toTs - fromTs)
-    if (dtSec <= 0) return { commitFee: 0n, borrowInterest: 0n, dtSec: 0, commitFeeRemainder: commitFeeRemainderIn, borrowInterestRemainder: borrowInterestRemainderIn }
-
-    const DENOM = BPS_DENOMINATOR * SECONDS_PER_YEAR
-
-    // Commitment fee accrues on unutilized capital = idle + divertedValueBase (current diverted value, not just principal)
-    // divertedValueBase represents the CURRENT strategy position value (principal + returns), not just principal
-    // REMAINDER ACCUMULATION: carry forward truncated fraction from previous segments to prevent
-    // BigInt truncation drift with small amounts / short time windows
-    const unutilisedBase = idleBaseTracked + divertedValueBase
-    const commitFeeNumerator = unutilisedBase * rates.commitFeeRateBps * BigInt(dtSec) + commitFeeRemainderIn
-    const commitFee = commitFeeNumerator / DENOM
-    const commitFeeRemainder = commitFeeNumerator % DENOM
-
-    // EXCEL BEHAVIOR: Borrow interest accrues on the FULL borrowed base (principal + accrued interest + accrued commit fee)
-    // This creates interest-on-interest compounding, matching Excel's discrete compounding on Borrowed$.
-    const borrowIntNumerator = borrowedBaseStart * rates.borrowRateBps * BigInt(dtSec) + borrowInterestRemainderIn
-    const borrowInterest = borrowIntNumerator / DENOM
-    const borrowInterestRemainder = borrowIntNumerator % DENOM
-
-    // Clamp deltas to >= 0 (should already be >= 0, but ensure it)
-    const commitFeeClamped = commitFee < 0n ? 0n : commitFee
-    const borrowInterestClamped = borrowInterest < 0n ? 0n : borrowInterest
-
-    // Detailed logging is handled by eerLog() in the calling code (debug-gated)
-
-    return { commitFee: commitFeeClamped, borrowInterest: borrowInterestClamped, dtSec, commitFeeRemainder, borrowInterestRemainder }
   }
 
   // ============================================================================
