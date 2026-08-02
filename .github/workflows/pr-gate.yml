@@ -58,6 +58,15 @@ jobs:
             exit 1
           }
 
+      - name: Typegen parity (abi/*.json ↔ src/abi)
+        # Committed ABI bindings must be exactly what squid-evm-typegen emits.
+        run: |
+          npx squid-evm-typegen ./src/abi ./abi/*.json --multicall
+          git diff --exit-code -- src/abi || {
+            echo "::error::src/abi is out of sync with abi/*.json — run sqd typegen and commit"
+            exit 1
+          }
+
       - name: Migration drift check
         # Apply committed migrations to an empty DB, then ask TypeORM for a new
         # migration — if one appears, committed migrations don't reproduce the
