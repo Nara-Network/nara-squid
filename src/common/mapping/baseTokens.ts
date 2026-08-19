@@ -92,7 +92,7 @@ export const TRACKED_TOKENS: TokenConfig[] = [
     },
         {
         symbol: 'NaraUSD',
-        address: '0x0e26A4E2dCb28796E3088345B6bAc3D46192bF17',
+        address: '0x749B42FC2e6c90D0B30CB425641DfaeB71F06066',
         name: 'NaraUSD',
         network: Network.ETHEREUM_SEPOLIA,
         decimals: 18n,
@@ -101,7 +101,7 @@ export const TRACKED_TOKENS: TokenConfig[] = [
     },
     {
         symbol: 'NaraUSD+',
-        address: '0xfe3D71E78D58503c82559357fBdE52863B5969dc',
+        address: '0x0371c2487032921f4E7eb666868a13882f0b3152',
         name: 'NaraUSD',
         network: Network.ETHEREUM_SEPOLIA,
         decimals: 18n,
