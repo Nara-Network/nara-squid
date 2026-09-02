@@ -109,6 +109,13 @@ export const getRpcUrl = (
   network: Network,
   fallbackKey?: any,
 ): string | { url: string; rateLimit?: number; maxBatchCallSize?: number } => {
+  // Per-network escape hatch: RPC_URL_<NETWORK> overrides every provider branch below.
+  // Set as a slot secret when a metered key dies (the testnet Ankr key 401ing stalled the
+  // processor for hours); leaves other slots untouched when unset.
+  const override = process.env[`RPC_URL_${network}`];
+  if (override) {
+    return { url: override, rateLimit: 10, maxBatchCallSize: 100 };
+  }
   if (alchemyFallbacks.includes(network) && fallbackKey) {
     return {
       url: `https://${alchemySlugByNetwork[network as keyof typeof alchemySlugByNetwork]}.g.alchemy.com/v2/${fallbackKey}`,
