@@ -4,6 +4,9 @@ version: 1
 description: 'The very first evm squid from manifest'
 build:
 deploy:
+  env:
+    # Public keyless RPC — routes around the 401ing Ankr key on this testnet slot.
+    RPC_URL_ETHEREUM_SEPOLIA: https://ethereum-sepolia-rpc.publicnode.com
   addons:
     postgres:
       config:
@@ -17,7 +20,6 @@ deploy:
     - COIN_GECKO_API_KEY
     - OZEAN_ACCESS_TOKEN
     - SUBSQUID_MASTER_TOKEN
-    - RPC_URL_ETHEREUM_SEPOLIA
   init:
     cmd:
       - npx
