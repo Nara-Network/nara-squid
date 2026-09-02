@@ -5,8 +5,8 @@ description: 'The very first evm squid from manifest'
 build:
 deploy:
   env:
-    # Public keyless RPC — routes around the 401ing Ankr key on this testnet slot.
-    RPC_URL_ETHEREUM_SEPOLIA: https://ethereum-sepolia-rpc.publicnode.com
+    # Keyless archive-capable RPC (publicnode is pruned; the stats path reads weeks-old state).
+    RPC_URL_ETHEREUM_SEPOLIA: https://sepolia.gateway.tenderly.co
   addons:
     postgres:
       config:
