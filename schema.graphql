@@ -102,11 +102,13 @@ enum NaraRedemptionAction {
   INSTANT_REDEEM
   REQUESTED
   COMPLETED
+  CANCELLED
 }
 
 enum NaraRedemptionStatus {
   REQUESTED
   COMPLETED
+  CANCELLED
 }
 
 type NaraRedemption @entity {
