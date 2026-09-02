@@ -167,6 +167,16 @@ async function parseNaraRedemptionActivity(
       collateralAmount = completedCollateral;
       break;
     }
+    case NaraUSD.events.RedemptionCancelled.topic: {
+      const { user, naraUsdAmount: cancelledAmount } = NaraUSD.events.RedemptionCancelled.decode(log);
+      action = NaraRedemptionAction.CANCELLED;
+      userAddress = user.toLowerCase();
+      // The event carries no collateral asset; the pending record supplies it below.
+      collateralAssetAddress = '';
+      naraUsdAmount = cancelledAmount;
+      collateralAmount = undefined;
+      break;
+    }
     default:
       return { users, naraRedemptions, naraRedemptionActivities, totalRequestedAmounts };
   }
@@ -244,11 +254,19 @@ async function parseNaraRedemptionActivity(
       -existingPendingRedemption.naraUsdAmount,
     );
 
-    existingPendingRedemption.status = NaraRedemptionStatus.COMPLETED;
-    existingPendingRedemption.naraUsdAmount = naraUsdAmount;
-    existingPendingRedemption.collateralAssetAddress = collateralAssetAddress;
-    existingPendingRedemption.collateralAmount = collateralAmount;
-    existingPendingRedemption.completedAt = timestamp;
+    if (action === NaraRedemptionAction.CANCELLED) {
+      // A cancel releases the escrow untouched: keep the request's own asset and leave it
+      // without a completion timestamp so histories read requested → cancelled.
+      collateralAssetAddress = existingPendingRedemption.collateralAssetAddress;
+      existingPendingRedemption.status = NaraRedemptionStatus.CANCELLED;
+      existingPendingRedemption.collateralAmount = undefined;
+    } else {
+      existingPendingRedemption.status = NaraRedemptionStatus.COMPLETED;
+      existingPendingRedemption.naraUsdAmount = naraUsdAmount;
+      existingPendingRedemption.collateralAssetAddress = collateralAssetAddress;
+      existingPendingRedemption.collateralAmount = collateralAmount;
+      existingPendingRedemption.completedAt = timestamp;
+    }
     existingPendingRedemption.updatedAt = timestamp;
     redemption = existingPendingRedemption;
   }
