@@ -8,7 +8,7 @@ deploy:
     # Keyless archive-capable RPCs replacing the revoked Ankr key (2026-09-03 incident:
     # both processors stalled hours behind head). Same fix proven on the testnet slot.
     RPC_URL_ETHEREUM: https://mainnet.gateway.tenderly.co
-    RPC_URL_ETHEREUM_SEPOLIA: https://sepolia.gateway.tenderly.co
+    RPC_URL_ETHEREUM_SEPOLIA: https://rpc.sepolia.ethpandaops.io
   addons:
     postgres:
       config:
