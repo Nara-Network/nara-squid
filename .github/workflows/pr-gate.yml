@@ -1,0 +1,93 @@
+name: PR Gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: squid
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 23798:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install (locked)
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Tests
+        run: npm test
+
+      - name: Codegen parity (schema.graphql ↔ src/model)
+        # Committed generated code must be exactly what squid-typeorm-codegen emits.
+        run: |
+          npx squid-typeorm-codegen
+          git diff --exit-code -- src/model || {
+            echo "::error::src/model is out of sync with schema.graphql — run 'npx squid-typeorm-codegen' and commit"
+            exit 1
+          }
+
+      - name: Typegen parity (abi/*.json ↔ src/abi)
+        # Committed ABI bindings must be exactly what squid-evm-typegen emits.
+        run: |
+          npx squid-evm-typegen ./src/abi ./abi/*.json --multicall
+          git diff --exit-code -- src/abi || {
+            echo "::error::src/abi is out of sync with abi/*.json — run sqd typegen and commit"
+            exit 1
+          }
+
+      - name: Migration drift check
+        # Apply committed migrations to an empty DB, then ask TypeORM for a new
+        # migration — if one appears, committed migrations don't reproduce the
+        # current model.
+        env:
+          DB_HOST: localhost
+          DB_PORT: "23798"
+          DB_NAME: squid
+          DB_USER: postgres
+          DB_PASS: postgres
+        run: |
+          npx squid-typeorm-migration apply
+          npx squid-typeorm-migration generate || true
+          if [ -n "$(git status --porcelain db/migrations)" ]; then
+            echo "::error::Committed migrations don't reproduce the model — regenerate migrations"
+            git status --porcelain db/migrations
+            exit 1
+          fi
+
+      - name: Audit (non-blocking until existing advisories are cleared)
+        # High-severity advisories pre-exist in the dependency tree; blocking
+        # would freeze all PRs on old debt. Visible here — ratchet to a hard
+        # failure (remove continue-on-error) once cleared.
+        continue-on-error: true
+        run: npm audit --audit-level=high
