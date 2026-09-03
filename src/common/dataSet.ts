@@ -192,6 +192,7 @@ export function generatePortalDataSet(configurator: Configurator) {
           NaraUSD.events.Redeem.topic,
           NaraUSD.events.RedemptionRequested.topic,
           NaraUSD.events.RedemptionCompleted.topic,
+          NaraUSD.events.RedemptionCancelled.topic,
         ],
       },
     });

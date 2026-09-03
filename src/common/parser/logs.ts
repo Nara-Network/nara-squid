@@ -459,7 +459,8 @@ export async function parseContext(
         switch (log.topics[0]) {
           case NaraUSD.events.Redeem.topic:
           case NaraUSD.events.RedemptionRequested.topic:
-          case NaraUSD.events.RedemptionCompleted.topic: {
+          case NaraUSD.events.RedemptionCompleted.topic:
+          case NaraUSD.events.RedemptionCancelled.topic: {
             ; ({ users, naraRedemptions, naraRedemptionActivities, totalRequestedAmounts } = await parserService.parseNaraRedemptionActivity(
               ctx,
               log,

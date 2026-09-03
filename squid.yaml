@@ -17,6 +17,7 @@ deploy:
     - COIN_GECKO_API_KEY
     - OZEAN_ACCESS_TOKEN
     - SUBSQUID_MASTER_TOKEN
+    - RPC_URL_ETHEREUM_SEPOLIA
   init:
     cmd:
       - npx
