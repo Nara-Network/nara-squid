@@ -5,12 +5,16 @@ import { AbiFunction, FunctionArguments, FunctionReturn } from '@subsquid/evm-ab
 import { BigDecimal } from '@subsquid/big-decimal';
 import { parseUnits } from 'viem';
 import { tokensService } from '../services/tokens';
+import { isHeadLagError } from '../common/rpc';
 
 // In-memory cache for token decimals
 const TOKEN_DECIMALS_CACHE = new Map<string, number>();
 const DEFAULT_CONTRACT_CALL_MAX_RETRIES = 5;
 const DEFAULT_CONTRACT_CALL_RETRY_DELAY_MS = 3_000;
-const DEFAULT_CONTRACT_CALL_MAX_RETRY_MS = 30_000;
+// Total budget for one readContract. Each attempt can itself wait out ~31 s of node lag inside the RPC
+// client (HEAD_LAG_DELAYS_MS in common/rpc.ts); a 30 s budget left no time for a second attempt, so one
+// slow block crashed the processor.
+export const DEFAULT_CONTRACT_CALL_MAX_RETRY_MS = 120_000;
 
 type ContractCallDiagnostics = {
   rpcHead?: number;
@@ -41,15 +45,19 @@ function getRpcErrorCode(error: unknown): unknown {
     : undefined;
 }
 
-function isRetryableRpcError(error: unknown): boolean {
+export function isRetryableRpcError(error: unknown): boolean {
+  if (isHeadLagError(error)) return true;
   const message = getErrorMessage(error).toLowerCase();
   const code = getRpcErrorCode(error);
   return (
-    message.includes('header not found') ||
     message.includes('timeout') ||
     message.includes('econnreset') ||
     message.includes('etimedout') ||
     message.includes('missing trie node') ||
+    message.includes('rate limit') ||
+    message.includes('too many requests') ||
+    // HttpError from @subsquid/http-client: "Got 429 from <url>"
+    /got (408|429|5\d\d) from/.test(message) ||
     code === 429
   );
 }

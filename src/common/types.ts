@@ -1,4 +1,3 @@
-import { assertNotNull } from '@subsquid/util-internal';
 import { Network } from '../model';
 
 export type Strategy = {
@@ -92,15 +91,15 @@ const alchemySlugByNetwork = {
   ETHEREUM_SEPOLIA: 'eth-sepolia'
 };
 
-const squidSlugByNetwork = {
-  ETHEREUM: process.env.RPC_ETHEREUM_HTTP,
-  ETHEREUM_SEPOLIA: process.env.RPC_ETHEREUM_SEPOLIA_HTTP,
-  BSC: process.env.RPC_BSC_HTTP
+// Injected by the SQD Cloud RPC addons declared in squid.yaml (eth.http, eth-sepolia.http, bsc.http).
+const squidRpcAddonByNetwork = {
+  ETHEREUM: process.env.RPC_ETH_HTTP,
+  ETHEREUM_SEPOLIA: process.env.RPC_ETH_SEPOLIA_HTTP,
+  BSC: process.env.RPC_BSC_HTTP,
 };
 
 const alchemyFallbacks = JSON.parse(process.env.ALCHEMY_FALLBACK_NETWORKS || '[]'); // unique key
 const blastFallbacks = JSON.parse(process.env.BLAST_FALLBACK_NETWORKS || '[]'); // common api key
-const squidFallbacks = JSON.parse(process.env.SQUID_FALLBACK_NETWORKS || '[]'); // common key
 
 const blastApiKey = process.env.BLAST_API_KEY;
 const ankrApiKey = process.env.ANKR_API_KEY!;
@@ -116,17 +115,18 @@ export const getRpcUrl = (
   if (override) {
     return { url: override, rateLimit: 10, maxBatchCallSize: 100 };
   }
+  // The SQD Cloud RPC addon runs next to the Portal, so it lags the Portal head least and
+  // has no third-party rate limit. Used whenever the slot declares it.
+  const addon = squidRpcAddonByNetwork[network as keyof typeof squidRpcAddonByNetwork];
+  if (addon) {
+    return addon;
+  }
   if (alchemyFallbacks.includes(network) && fallbackKey) {
     return {
       url: `https://${alchemySlugByNetwork[network as keyof typeof alchemySlugByNetwork]}.g.alchemy.com/v2/${fallbackKey}`,
       rateLimit: undefined,
       maxBatchCallSize: 1000,
     };
-  } else if (squidFallbacks.includes(network)) {
-    return assertNotNull(
-      squidSlugByNetwork[network as keyof typeof squidSlugByNetwork],
-      `Required env variable for ${network} network is missing`
-    );
   }
   return {
     url: `https://rpc.ankr.com/${ankrSlugByNetwork[network as keyof typeof ankrSlugByNetwork]}/${ankrApiKey}`,
