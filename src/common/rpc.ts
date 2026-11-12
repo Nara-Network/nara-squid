@@ -7,7 +7,7 @@ export type RpcEndpoint = string | { url: string; rateLimit?: number; maxBatchCa
 const HEAD_LAG_ERROR = /block not found|header not found|unknown block|cannot query unfinalized data|after last accepted block/i;
 
 // Delays between retries of a head-lag failure (~31 s in total).
-const HEAD_LAG_DELAYS_MS = [500, 1_000, 2_000, 3_000, 5_000, 8_000, 12_000];
+export const HEAD_LAG_DELAYS_MS = [500, 1_000, 2_000, 3_000, 5_000, 8_000, 12_000];
 
 // Transport failures (429, 408, 502-504, timeouts, resets) are retried by RpcClient
 // itself. Its default of 0 retries on a 10/100/500 ms schedule gave up within a second

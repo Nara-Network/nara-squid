@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import http from 'http';
 import { AddressInfo } from 'net';
 import { HttpClient } from '@subsquid/http-client';
-import { PORTAL_HTTP_RETRY, createRpcClient, isHeadLagError, retryHeadLag } from '../common/rpc';
-import { isRetryableRpcError } from '../helpers/common';
+import { HEAD_LAG_DELAYS_MS, PORTAL_HTTP_RETRY, createRpcClient, isHeadLagError, retryHeadLag } from '../common/rpc';
+import { DEFAULT_CONTRACT_CALL_MAX_RETRY_MS, isRetryableRpcError } from '../helpers/common';
 
 type Reply = { status?: number; body: unknown };
 
@@ -191,5 +191,14 @@ describe('PORTAL_HTTP_RETRY', function () {
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+});
+
+describe('readContract retry budget', () => {
+  it('leaves room for a second attempt after the client waits out head lag', () => {
+    // 12 Nov: Sepolia's node sat one block behind for 32 s; the client's head-lag wait used the whole 30 s
+    // budget, readContract gave up after 1 attempt and the processor restarted.
+    const oneAttemptMs = HEAD_LAG_DELAYS_MS.reduce((a, b) => a + b, 0);
+    assert.ok(DEFAULT_CONTRACT_CALL_MAX_RETRY_MS >= 3 * oneAttemptMs, `${DEFAULT_CONTRACT_CALL_MAX_RETRY_MS} vs ${oneAttemptMs} per attempt`);
   });
 });

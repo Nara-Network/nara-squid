@@ -11,7 +11,10 @@ import { isHeadLagError } from '../common/rpc';
 const TOKEN_DECIMALS_CACHE = new Map<string, number>();
 const DEFAULT_CONTRACT_CALL_MAX_RETRIES = 5;
 const DEFAULT_CONTRACT_CALL_RETRY_DELAY_MS = 3_000;
-const DEFAULT_CONTRACT_CALL_MAX_RETRY_MS = 30_000;
+// Total budget for one readContract. Each attempt can itself wait out ~31 s of node lag inside the RPC
+// client (HEAD_LAG_DELAYS_MS in common/rpc.ts); a 30 s budget left no time for a second attempt, so one
+// slow block crashed the processor.
+export const DEFAULT_CONTRACT_CALL_MAX_RETRY_MS = 120_000;
 
 type ContractCallDiagnostics = {
   rpcHead?: number;
