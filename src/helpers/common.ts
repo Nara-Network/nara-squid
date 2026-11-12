@@ -5,6 +5,7 @@ import { AbiFunction, FunctionArguments, FunctionReturn } from '@subsquid/evm-ab
 import { BigDecimal } from '@subsquid/big-decimal';
 import { parseUnits } from 'viem';
 import { tokensService } from '../services/tokens';
+import { isHeadLagError } from '../common/rpc';
 
 // In-memory cache for token decimals
 const TOKEN_DECIMALS_CACHE = new Map<string, number>();
@@ -41,15 +42,19 @@ function getRpcErrorCode(error: unknown): unknown {
     : undefined;
 }
 
-function isRetryableRpcError(error: unknown): boolean {
+export function isRetryableRpcError(error: unknown): boolean {
+  if (isHeadLagError(error)) return true;
   const message = getErrorMessage(error).toLowerCase();
   const code = getRpcErrorCode(error);
   return (
-    message.includes('header not found') ||
     message.includes('timeout') ||
     message.includes('econnreset') ||
     message.includes('etimedout') ||
     message.includes('missing trie node') ||
+    message.includes('rate limit') ||
+    message.includes('too many requests') ||
+    // HttpError from @subsquid/http-client: "Got 429 from <url>"
+    /got (408|429|5\d\d) from/.test(message) ||
     code === 429
   );
 }

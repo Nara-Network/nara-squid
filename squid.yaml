@@ -4,16 +4,17 @@ version: 1
 description: 'The very first evm squid from manifest'
 build:
 deploy:
-  env:
-    # Keyless archive-capable RPCs replacing the revoked Ankr key (2026-09-03 incident:
-    # both processors stalled hours behind head). Same fix proven on the testnet slot.
-    RPC_URL_ETHEREUM: https://mainnet.gateway.tenderly.co
-    RPC_URL_ETHEREUM_SEPOLIA: https://rpc.sepolia.ethpandaops.io
   addons:
     postgres:
       config:
         max_pred_locks_per_transaction: 1024
         max_locks_per_transaction: 1024
+    # SQD Cloud RPC (RPC_ETH_HTTP, RPC_ETH_SEPOLIA_HTTP). The keyless Tenderly gateway used
+    # before rate-limited the mainnet processor into a restart every ~12 min. A slot can
+    # still override one network by setting RPC_URL_<NETWORK> under deploy.env.
+    rpc:
+      - eth.http
+      - eth-sepolia.http
 
   secrets:
     - OZEAN_API_BASE_URL
@@ -22,7 +23,6 @@ deploy:
     - COIN_GECKO_API_KEY
     - OZEAN_ACCESS_TOKEN
     - SUBSQUID_MASTER_TOKEN
-    - RPC_URL_ETHEREUM_SEPOLIA
   init:
     cmd:
       - npx
