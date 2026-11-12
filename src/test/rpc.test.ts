@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import http from 'http';
 import { AddressInfo } from 'net';
-import { createRpcClient, isHeadLagError, retryHeadLag } from '../common/rpc';
+import { HttpClient } from '@subsquid/http-client';
+import { PORTAL_HTTP_RETRY, createRpcClient, isHeadLagError, retryHeadLag } from '../common/rpc';
 import { isRetryableRpcError } from '../helpers/common';
 
 type Reply = { status?: number; body: unknown };
@@ -162,5 +163,33 @@ describe('getRpcUrl', () => {
     delete require.cache[require.resolve('../common/types')];
     const { getRpcUrl } = require('../common/types');
     assert.equal(getRpcUrl('ETHEREUM').url, 'http://override.example');
+  });
+});
+
+describe('PORTAL_HTTP_RETRY', function () {
+  this.timeout(10_000);
+
+  it('makes the portal HttpClient survive a connection reset', async () => {
+    let requests = 0;
+    const server = http.createServer((req, res) => {
+      requests++;
+      if (requests % 2 === 1) {
+        req.socket.destroy(); // ECONNRESET on the client, as the Portal did in prod
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"number":1}');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/head`;
+    try {
+      const res = await new HttpClient(PORTAL_HTTP_RETRY).get(url);
+      assert.deepEqual(res, { number: 1 });
+      assert.equal(requests, 2);
+      const err = await new HttpClient({}).get(url).catch((e: Error) => e);
+      assert.ok(err instanceof Error, 'without retries the reset is fatal');
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });

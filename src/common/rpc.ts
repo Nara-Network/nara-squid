@@ -15,6 +15,13 @@ const HEAD_LAG_DELAYS_MS = [500, 1_000, 2_000, 3_000, 5_000, 8_000, 12_000];
 const TRANSPORT_RETRY_ATTEMPTS = 20;
 const TRANSPORT_RETRY_SCHEDULE_MS = [500, 1_000, 2_000, 5_000, 10_000, 20_000];
 
+// Portal stream requests: the portal client's HttpClient defaults to 0 retries, so one
+// ECONNRESET while opening a stream crashed the processor.
+export const PORTAL_HTTP_RETRY = {
+  retryAttempts: 10,
+  retrySchedule: [500, 1_000, 2_000, 5_000, 10_000, 20_000],
+};
+
 export function isHeadLagError(error: unknown): boolean {
   return error instanceof Error && HEAD_LAG_ERROR.test(error.message);
 }

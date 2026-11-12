@@ -3,6 +3,7 @@ import * as evmObjects from '@subsquid/evm-objects';
 import { DataSourceBuilder, FieldSelection } from '@subsquid/evm-stream';
 import type { Logger } from '@subsquid/logger';
 import { RpcClient } from '@subsquid/rpc-client';
+import { PORTAL_HTTP_RETRY } from './rpc';
 import { Store } from '@subsquid/typeorm-store';
 
 import * as AccountantAbi from '../abi/AccountantWithRateProviders';
@@ -65,6 +66,7 @@ export function generatePortalDataSet(configurator: Configurator) {
       maxBytes: getPositiveIntegerEnv('SQD_PORTAL_MAX_BYTES', DEFAULT_PORTAL_MAX_BYTES),
       maxIdleTime: getPositiveIntegerEnv('SQD_PORTAL_MAX_IDLE_TIME_MS', DEFAULT_PORTAL_MAX_IDLE_TIME_MS),
       maxWaitTime: getPositiveIntegerEnv('SQD_PORTAL_MAX_WAIT_TIME_MS', DEFAULT_PORTAL_MAX_WAIT_TIME_MS),
+      http: PORTAL_HTTP_RETRY,
     })
     .setFields(fields)
     .setBlockRange({ from: startBlock });
